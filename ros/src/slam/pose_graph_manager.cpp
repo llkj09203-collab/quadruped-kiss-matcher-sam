@@ -382,7 +382,6 @@ void PoseGraphManager::performRegistration() {
   loop_idx_pair_queue_.pop();
 
   const RegOutput &reg_output = loop_closure_->performLoopClosure(keyframes_, query_idx, match_idx);
-  need_lc_cloud_vis_update_   = true;
 
   if (reg_output.is_valid_) {
     RCLCPP_INFO(this->get_logger(), "LC accepted. Overlapness: %.3f", reg_output.overlapness_);
@@ -401,10 +400,11 @@ void PoseGraphManager::performRegistration() {
     }
 
     vis_loop_edges_.emplace_back(query_idx, match_idx);
-    succeeded_query_idx_   = query_idx;
-    loop_closure_added_    = true;
-    need_map_update_       = true;
-    need_graph_vis_update_ = true;
+    succeeded_query_idx_      = query_idx;
+    need_lc_cloud_vis_update_ = true;
+    loop_closure_added_       = true;
+    need_map_update_          = true;
+    need_graph_vis_update_    = true;
 
     // --------------------------------------------------
     // TODO(hlim): resurrect pose_graph_tools_msgs
@@ -516,7 +516,19 @@ void PoseGraphManager::visualizeLoopClosureClouds() {
     return;
   }
 
-  const auto &query_timestamp = toRclcppTime(keyframes_[succeeded_query_idx_].timestamp_);
+  rclcpp::Time query_timestamp;
+  {
+    std::lock_guard<std::mutex> lock(keyframes_mutex_);
+    if (succeeded_query_idx_ >= keyframes_.size()) {
+      RCLCPP_ERROR(this->get_logger(),
+                   "Invalid successful loop-closure keyframe index: %zu (keyframe count: %zu)",
+                   succeeded_query_idx_,
+                   keyframes_.size());
+      need_lc_cloud_vis_update_ = false;
+      return;
+    }
+    query_timestamp = toRclcppTime(keyframes_[succeeded_query_idx_].timestamp_);
+  }
 
   debug_src_pub_->publish(toROSMsg(loop_closure_->getSourceCloud(), map_frame_, query_timestamp));
   debug_tgt_pub_->publish(toROSMsg(loop_closure_->getTargetCloud(), map_frame_, query_timestamp));
