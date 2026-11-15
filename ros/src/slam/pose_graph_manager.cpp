@@ -7,6 +7,7 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   double loop_pub_hz;
   double loop_detector_hz;
   double loop_nnsearch_hz;
+  bool enable_loop_nnsearch;
   double map_update_hz;
   double vis_hz;
 
@@ -20,6 +21,7 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   loop_pub_hz            = declare_parameter<double>("loop_pub_hz", 0.1);
   loop_detector_hz       = declare_parameter<double>("loop_detector_hz", 1.0);
   loop_nnsearch_hz       = declare_parameter<double>("loop_nnsearch_hz", 1.0);
+  enable_loop_nnsearch   = declare_parameter<bool>("loop.enable_nnsearch", false);
   loop_pub_delayed_time_ = declare_parameter<double>("loop_pub_delayed_time", 60.0);
   map_update_hz          = declare_parameter<double>("map_update_hz", 0.2);
   vis_hz                 = declare_parameter<double>("vis_hz", 0.5);
@@ -176,9 +178,11 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
       this->create_wall_timer(std::chrono::duration<double>(1.0 / loop_detector_hz),
                               std::bind(&PoseGraphManager::detectLoopClosureByLoopDetector, this));
 
-  loop_nnsearch_timer_ =
-      this->create_wall_timer(std::chrono::duration<double>(1.0 / loop_nnsearch_hz),
-                              std::bind(&PoseGraphManager::detectLoopClosureByNNSearch, this));
+  if (enable_loop_nnsearch) {
+    loop_nnsearch_timer_ =
+        this->create_wall_timer(std::chrono::duration<double>(1.0 / loop_nnsearch_hz),
+                                std::bind(&PoseGraphManager::detectLoopClosureByNNSearch, this));
+  }
 
   graph_vis_timer_ =
       this->create_wall_timer(std::chrono::duration<double>(1.0 / vis_hz),

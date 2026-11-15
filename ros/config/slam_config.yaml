@@ -28,6 +28,7 @@
 
     loop:
       verbose: true                  # Enable verbose output
+      enable_nnsearch: false         # Scan Context is primary; enable only as a fallback
       # If true, Z-axis differences are considered in loop detection.
       # If false, loop detection assumes the robot moves mainly on a single horizontal plane.
       is_multilayer_env: false                # ⭐ Whether the robot operates in a multilayer environment
@@ -38,7 +39,7 @@
 
     scan_context:
       enable: true
-      verbose: false
+      verbose: true
       num_rings: 20
       num_sectors: 60
       max_radius: 80.0
