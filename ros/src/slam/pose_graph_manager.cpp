@@ -30,6 +30,8 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   map_voxel_res_                   = declare_parameter<double>("map_voxel_resolution", 1.0);
   save_voxel_res_                  = declare_parameter<double>("save_voxel_resolution", 0.3);
   keyframe_thr_                    = declare_parameter<double>("keyframe.keyframe_threshold", 1.0);
+  keyframe_rotation_thr_rad_ =
+      declare_parameter<double>("keyframe.rotation_threshold_deg", 10.0) * M_PI / 180.0;
   lc_config.num_submap_keyframes_  = declare_parameter<int>("keyframe.num_submap_keyframes", 5);
   lc_config.verbose_               = declare_parameter<bool>("loop.verbose", false);
   lc_config.is_multilayer_env_     = declare_parameter<bool>("loop.is_multilayer_env", false);
@@ -48,10 +50,40 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   lc_config.num_inliers_threshold_ =
       declare_parameter<int>("global_reg.num_inliers_threshold", 100);
 
+  ld_config.verbose_ = declare_parameter<bool>("scan_context.verbose", false);
+  ld_config.enable_ = declare_parameter<bool>("scan_context.enable", true);
+  ld_config.num_rings_ = declare_parameter<int>("scan_context.num_rings", 20);
+  ld_config.num_sectors_ = declare_parameter<int>("scan_context.num_sectors", 60);
+  ld_config.exclude_recent_ = declare_parameter<int>("scan_context.exclude_recent", 30);
+  ld_config.num_candidates_ = declare_parameter<int>("scan_context.num_candidates", 10);
+  ld_config.max_radius_ = declare_parameter<double>("scan_context.max_radius", 80.0);
+  ld_config.distance_threshold_ =
+      declare_parameter<double>("scan_context.distance_threshold", 0.18);
+  ld_config.min_time_separation_ =
+      declare_parameter<double>("scan_context.min_time_separation", 30.0);
+
+  prior_variances_ = declare_parameter<std::vector<double>>(
+      "pose_graph.prior_variances", {1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2});
+  odom_variances_ = declare_parameter<std::vector<double>>(
+      "pose_graph.odom_variances", {1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2});
+  loop_variances_ = declare_parameter<std::vector<double>>(
+      "pose_graph.loop_variances", {1e-3, 1e-3, 1e-3, 1e-2, 1e-2, 1e-2});
+  loop_huber_k_ = declare_parameter<double>("pose_graph.loop_huber_k", 1.345);
+  adaptive_loop_noise_ = declare_parameter<bool>("pose_graph.adaptive_loop_noise", true);
+
+  use_gps_altitude_ = declare_parameter<bool>("gps_altitude.enable", false);
+  gps_time_tolerance_ = declare_parameter<double>("gps_altitude.time_tolerance", 0.2);
+  gps_xy_variance_ = declare_parameter<double>("gps_altitude.xy_variance", 1e8);
+  gps_z_variance_ = declare_parameter<double>("gps_altitude.z_variance", 4.0);
+  gps_huber_k_ = declare_parameter<double>("gps_altitude.huber_k", 1.345);
+
   save_map_bag_         = declare_parameter<bool>("result.save_map_bag", false);
   save_map_pcd_         = declare_parameter<bool>("result.save_map_pcd", false);
   save_in_kitti_format_ = declare_parameter<bool>("result.save_in_kitti_format", false);
   seq_name_             = declare_parameter<std::string>("result.seq_name", "");
+  output_directory_ = declare_parameter<std::string>("result.output_directory", "maps");
+  save_keyframes_incrementally_ =
+      declare_parameter<bool>("result.save_keyframes_incrementally", false);
 
   rclcpp::QoS qos(1);
   qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
@@ -89,6 +121,8 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   // this->create_publisher<pose_graph_tools_msgs::msg::PoseGraph>("/hydra_ros_node/external_loop_closures",
   // 10);
   realtime_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose_stamped", qos);
+  optimized_odom_pub_ =
+      this->create_publisher<nav_msgs::msg::Odometry>("odometry/optimized", qos);
   debug_src_pub_     = this->create_publisher<sensor_msgs::msg::PointCloud2>("lc/src", qos);
   debug_tgt_pub_     = this->create_publisher<sensor_msgs::msg::PointCloud2>("lc/tgt", qos);
   debug_coarse_aligned_pub_ =
@@ -108,6 +142,27 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
 
   sub_save_flag_ = this->create_subscription<std_msgs::msg::String>(
       "save_dir", 1, std::bind(&PoseGraphManager::saveFlagCallback, this, std::placeholders::_1));
+  if (use_gps_altitude_) {
+    sub_gps_ = this->create_subscription<sensor_msgs::msg::NavSatFix>(
+        "gps/fix", rclcpp::SensorDataQoS(),
+        std::bind(&PoseGraphManager::gpsCallback, this, std::placeholders::_1));
+  }
+
+  if (save_keyframes_incrementally_) {
+    const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
+    fs::create_directories(sequence_dir / "keyframes");
+    std::ofstream metadata(sequence_dir / "metadata.yaml");
+    metadata << "format_version: 1\n"
+             << "sequence: " << seq_name_ << "\n"
+             << "map_frame: " << map_frame_ << "\n"
+             << "base_frame: " << base_frame_ << "\n"
+             << "pointcloud_frame: lidar\n"
+             << "trajectory_format: tum\n"
+             << "keyframe_translation_threshold_m: " << keyframe_thr_ << "\n"
+             << "keyframe_rotation_threshold_deg: "
+             << keyframe_rotation_thr_rad_ * 180.0 / M_PI << "\n"
+             << "gps_altitude_enabled: " << (use_gps_altitude_ ? "true" : "false") << "\n";
+  }
 
   // hydra_loop_timer_ = this->create_wall_timer(
   //   std::chrono::duration<double>(1.0 / loop_pub_hz),
@@ -152,7 +207,7 @@ PoseGraphManager::~PoseGraphManager() {
   if (save_map_bag_) {
     RCLCPP_INFO(this->get_logger(), "NOTE(hlim): skipping final bag save in ROS2 example code.");
   }
-  if (save_map_pcd_) {
+  if (save_map_pcd_ && !keyframes_.empty()) {
     pcl::PointCloud<PointType>::Ptr corrected_map(new pcl::PointCloud<PointType>());
     corrected_map->reserve(keyframes_[0].scan_.size() * keyframes_.size());
 
@@ -163,8 +218,69 @@ PoseGraphManager::~PoseGraphManager() {
       }
     }
     const auto &voxelized_map = voxelize(corrected_map, save_voxel_res_);
-    pcl::io::savePCDFileASCII<PointType>(package_path_ + "/result.pcd", *voxelized_map);
-    RCLCPP_INFO(this->get_logger(), "Result saved in .pcd format (Destructor).");
+    const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
+    fs::create_directories(sequence_dir);
+    const fs::path map_path = sequence_dir / (seq_name_ + "_map.pcd");
+    pcl::io::savePCDFileBinary<PointType>(map_path.string(), *voxelized_map);
+    writeTrajectoryProducts();
+    RCLCPP_INFO(this->get_logger(), "Mapping data product saved to %s", sequence_dir.c_str());
+  }
+}
+
+gtsam::noiseModel::Diagonal::shared_ptr PoseGraphManager::diagonalNoise(
+    const std::vector<double> &variances) const {
+  if (variances.size() != 6) {
+    throw std::invalid_argument("Pose graph variance arrays must contain exactly 6 values");
+  }
+  gtsam::Vector6 values;
+  for (size_t i = 0; i < 6; ++i) values(static_cast<Eigen::Index>(i)) = variances[i];
+  return gtsam::noiseModel::Diagonal::Variances(values);
+}
+
+void PoseGraphManager::gpsCallback(const sensor_msgs::msg::NavSatFix::ConstSharedPtr msg) {
+  if (msg->status.status < sensor_msgs::msg::NavSatStatus::STATUS_FIX ||
+      !std::isfinite(msg->altitude)) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(gps_mutex_);
+  latest_gps_ = msg;
+}
+
+void PoseGraphManager::saveKeyframeIncrementally(const PoseGraphNode &node) {
+  if (!save_keyframes_incrementally_) return;
+  const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
+  const fs::path keyframe_dir = sequence_dir / "keyframes";
+  fs::create_directories(keyframe_dir);
+
+  std::ostringstream filename;
+  filename << std::setw(6) << std::setfill('0') << node.idx_ << ".pcd";
+  pcl::io::savePCDFileBinary<PointType>((keyframe_dir / filename.str()).string(), node.scan_);
+
+  std::ofstream timestamp_file(sequence_dir / "timestamps.txt", std::ios::app);
+  timestamp_file << node.idx_ << " " << std::fixed << std::setprecision(9) << node.timestamp_ << "\n";
+
+  std::ofstream odom_file(sequence_dir / "odometry_tum.txt", std::ios::app);
+  const auto pose = eigenToPoseStamped(node.pose_, map_frame_);
+  odom_file << std::fixed << std::setprecision(9) << node.timestamp_ << " "
+            << pose.pose.position.x << " " << pose.pose.position.y << " " << pose.pose.position.z
+            << " " << pose.pose.orientation.x << " " << pose.pose.orientation.y << " "
+            << pose.pose.orientation.z << " " << pose.pose.orientation.w << "\n";
+}
+
+void PoseGraphManager::writeTrajectoryProducts() {
+  if (!save_keyframes_incrementally_ || corrected_esti_.empty()) return;
+  const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
+  fs::create_directories(sequence_dir);
+  std::ofstream optimized_file(sequence_dir / "optimized_trajectory_tum.txt");
+  optimized_file << "# timestamp x y z qx qy qz qw\n";
+  std::lock_guard<std::mutex> lock(keyframes_mutex_);
+  for (size_t i = 0; i < keyframes_.size() && i < corrected_esti_.size(); ++i) {
+    const auto pose = gtsamToPoseStamped(corrected_esti_.at<gtsam::Pose3>(i), map_frame_);
+    optimized_file << std::fixed << std::setprecision(9) << keyframes_[i].timestamp_ << " "
+                   << pose.pose.position.x << " " << pose.pose.position.y << " "
+                   << pose.pose.position.z << " " << pose.pose.orientation.x << " "
+                   << pose.pose.orientation.y << " " << pose.pose.orientation.z << " "
+                   << pose.pose.orientation.w << "\n";
   }
 }
 
@@ -197,10 +313,9 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
   if (!is_initialized_) {
     keyframes_.push_back(current_frame_);
     appendKeyframePose(current_frame_);
+    saveKeyframeIncrementally(current_frame_);
 
-    auto variance_vector = (gtsam::Vector(6) << 1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2).finished();
-    gtsam::noiseModel::Diagonal::shared_ptr prior_noise =
-        gtsam::noiseModel::Diagonal::Variances(variance_vector);
+    auto prior_noise = diagonalNoise(prior_variances_);
 
     gtsam_graph_.add(
         gtsam::PriorFactor<gtsam::Pose3>(0, eigenToGtsam(current_frame_.pose_), prior_noise));
@@ -218,10 +333,9 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
         std::lock_guard<std::mutex> lock(keyframes_mutex_);
         keyframes_.push_back(current_frame_);
       }
+      saveKeyframeIncrementally(current_frame_);
 
-      auto variance_vector = (gtsam::Vector(6) << 1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2).finished();
-      gtsam::noiseModel::Diagonal::shared_ptr odom_noise =
-          gtsam::noiseModel::Diagonal::Variances(variance_vector);
+      auto odom_noise = diagonalNoise(odom_variances_);
 
       gtsam::Pose3 pose_from = eigenToGtsam(keyframes_[latest_keyframe_idx - 1].pose_corrected_);
       gtsam::Pose3 pose_to   = eigenToGtsam(current_frame_.pose_corrected_);
@@ -230,6 +344,32 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
         std::lock_guard<std::mutex> lock(graph_mutex_);
         gtsam_graph_.add(gtsam::BetweenFactor<gtsam::Pose3>(
             latest_keyframe_idx - 1, latest_keyframe_idx, pose_from.between(pose_to), odom_noise));
+
+        if (use_gps_altitude_) {
+          sensor_msgs::msg::NavSatFix::ConstSharedPtr gps;
+          {
+            std::lock_guard<std::mutex> gps_lock(gps_mutex_);
+            gps = latest_gps_;
+          }
+          if (gps) {
+            const double gps_stamp = rclcpp::Time(gps->header.stamp).seconds();
+            if (std::abs(gps_stamp - current_frame_.timestamp_) <= gps_time_tolerance_) {
+              if (!gps_origin_initialized_) {
+                gps_altitude_origin_ = gps->altitude - pose_to.z();
+                gps_origin_initialized_ = true;
+              }
+              gtsam::Vector3 gps_variances;
+              gps_variances << gps_xy_variance_, gps_xy_variance_, gps_z_variance_;
+              auto base_noise = gtsam::noiseModel::Diagonal::Variances(gps_variances);
+              auto robust_noise = gtsam::noiseModel::Robust::Create(
+                  gtsam::noiseModel::mEstimator::Huber::Create(gps_huber_k_), base_noise);
+              const gtsam::Point3 measurement(
+                  pose_to.x(), pose_to.y(), gps->altitude - gps_altitude_origin_);
+              gtsam_graph_.add(
+                  gtsam::GPSFactor(latest_keyframe_idx, measurement, robust_noise));
+            }
+          }
+        }
         init_esti_.insert(latest_keyframe_idx, pose_to);
       }
 
@@ -268,6 +408,7 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
         }
         loop_closure_added_ = false;
       }
+      writeTrajectoryProducts();
 
       const auto t_total = total_timer.toc();
 
@@ -343,8 +484,10 @@ void PoseGraphManager::buildMap() {
 }
 
 void PoseGraphManager::detectLoopClosureByLoopDetector() {
+  std::lock_guard<std::mutex> lock(keyframes_mutex_);
+  if (!is_initialized_ || keyframes_.empty()) return;
   auto &query = keyframes_.back();
-  if (!is_initialized_ || keyframes_.empty() || query.loop_detector_processed_) {
+  if (query.loop_detector_processed_) {
     return;
   }
   query.loop_detector_processed_ = true;
@@ -360,8 +503,10 @@ void PoseGraphManager::detectLoopClosureByLoopDetector() {
 }
 
 void PoseGraphManager::detectLoopClosureByNNSearch() {
+  std::lock_guard<std::mutex> lock(keyframes_mutex_);
+  if (!is_initialized_ || keyframes_.empty()) return;
   auto &query = keyframes_.back();
-  if (!is_initialized_ || keyframes_.empty() || query.nnsearch_processed_) {
+  if (query.nnsearch_processed_) {
     return;
   }
   query.nnsearch_processed_ = true;
@@ -388,10 +533,15 @@ void PoseGraphManager::performRegistration() {
     gtsam::Pose3 pose_from = eigenToGtsam(reg_output.pose_ * keyframes_[query_idx].pose_corrected_);
     gtsam::Pose3 pose_to   = eigenToGtsam(keyframes_[match_idx].pose_corrected_);
 
-    // TODO(hlim): Parameterize
-    auto variance_vector = (gtsam::Vector(6) << 1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2).finished();
-    gtsam::noiseModel::Diagonal::shared_ptr loop_noise =
-        gtsam::noiseModel::Diagonal::Variances(variance_vector);
+    std::vector<double> loop_variances = loop_variances_;
+    if (adaptive_loop_noise_) {
+      const double confidence = std::clamp(reg_output.overlapness_ / 100.0, 0.1, 1.0);
+      const double scale = 1.0 / (confidence * confidence);
+      for (auto &variance : loop_variances) variance *= scale;
+    }
+    auto loop_diagonal = diagonalNoise(loop_variances);
+    auto loop_noise = gtsam::noiseModel::Robust::Create(
+        gtsam::noiseModel::mEstimator::Huber::Create(loop_huber_k_), loop_diagonal);
 
     {
       std::lock_guard<std::mutex> lock(graph_mutex_);
@@ -448,6 +598,12 @@ void PoseGraphManager::visualizeCurrentData(const Eigen::Matrix4d &current_odom,
     geometry_msgs::msg::PoseStamped ps =
         eigenToPoseStamped(current_frame_.pose_corrected_, map_frame_);
     realtime_pose_pub_->publish(ps);
+
+    nav_msgs::msg::Odometry optimized_odom;
+    optimized_odom.header = ps.header;
+    optimized_odom.child_frame_id = base_frame_.empty() ? frame_id : base_frame_;
+    optimized_odom.pose.pose = ps.pose;
+    optimized_odom_pub_->publish(optimized_odom);
 
     geometry_msgs::msg::TransformStamped transform_stamped;
     transform_stamped.header.stamp    = timestamp;
@@ -597,9 +753,14 @@ visualization_msgs::msg::Marker PoseGraphManager::visualizeLoopDetectionRadius(
 
 bool PoseGraphManager::checkIfKeyframe(const PoseGraphNode &query_node,
                                        const PoseGraphNode &latest_node) {
-  return keyframe_thr_ < (latest_node.pose_corrected_.block<3, 1>(0, 3) -
-                          query_node.pose_corrected_.block<3, 1>(0, 3))
-                             .norm();
+  const double translation = (latest_node.pose_corrected_.block<3, 1>(0, 3) -
+                              query_node.pose_corrected_.block<3, 1>(0, 3))
+                                 .norm();
+  const Eigen::Matrix3d relative_rotation =
+      latest_node.pose_corrected_.block<3, 3>(0, 0).transpose() *
+      query_node.pose_corrected_.block<3, 3>(0, 0);
+  const double rotation = Eigen::AngleAxisd(relative_rotation).angle();
+  return translation > keyframe_thr_ || rotation > keyframe_rotation_thr_rad_;
 }
 
 void PoseGraphManager::saveFlagCallback(const std_msgs::msg::String::ConstSharedPtr &msg) {

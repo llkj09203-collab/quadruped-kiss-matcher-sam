@@ -26,6 +26,7 @@
 #include <rclcpp/qos.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <visualization_msgs/msg/marker.hpp>
@@ -50,6 +51,8 @@
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
+#include <gtsam/navigation/GPSFactor.h>
+#include <gtsam/linear/NoiseModel.h>
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/slam/PriorFactor.h>
 
@@ -101,17 +104,24 @@ class PoseGraphManager : public rclcpp::Node {
                        const kiss_matcher::PoseGraphNode &latest_node);
 
   void saveFlagCallback(const std_msgs::msg::String::ConstSharedPtr &msg);
+  void gpsCallback(const sensor_msgs::msg::NavSatFix::ConstSharedPtr msg);
+  void saveKeyframeIncrementally(const kiss_matcher::PoseGraphNode &node);
+  void writeTrajectoryProducts();
+  gtsam::noiseModel::Diagonal::shared_ptr diagonalNoise(
+      const std::vector<double> &variances) const;
 
   std::string map_frame_;
   std::string base_frame_;
   std::string package_path_;
   std::string seq_name_;
+  std::string output_directory_;
 
   std::mutex realtime_pose_mutex_;
   std::mutex keyframes_mutex_;
   std::mutex graph_mutex_;
   std::mutex lc_mutex_;
   std::mutex vis_mutex_;
+  std::mutex gps_mutex_;
 
   Eigen::Matrix4d last_corrected_pose_ = Eigen::Matrix4d::Identity();
   Eigen::Matrix4d odom_delta_          = Eigen::Matrix4d::Identity();
@@ -130,12 +140,28 @@ class PoseGraphManager : public rclcpp::Node {
   gtsam::Values corrected_esti_;
 
   double keyframe_thr_;
+  double keyframe_rotation_thr_rad_;
   double scan_voxel_res_;
   double map_voxel_res_;
   double save_voxel_res_;
   double loop_pub_delayed_time_;
   double loop_detection_radius_;  // Only for visualization
   int sub_key_num_;
+
+  std::vector<double> prior_variances_;
+  std::vector<double> odom_variances_;
+  std::vector<double> loop_variances_;
+  double loop_huber_k_ = 1.345;
+  bool adaptive_loop_noise_ = true;
+
+  bool use_gps_altitude_ = false;
+  double gps_time_tolerance_ = 0.2;
+  double gps_xy_variance_ = 1e8;
+  double gps_z_variance_ = 4.0;
+  double gps_huber_k_ = 1.345;
+  bool gps_origin_initialized_ = false;
+  double gps_altitude_origin_ = 0.0;
+  sensor_msgs::msg::NavSatFix::ConstSharedPtr latest_gps_;
 
   size_t succeeded_query_idx_ = 0;
   std::vector<std::pair<size_t, size_t>> vis_loop_edges_;
@@ -154,6 +180,7 @@ class PoseGraphManager : public rclcpp::Node {
   bool save_map_bag_         = false;
   bool save_map_pcd_         = false;
   bool save_in_kitti_format_ = false;
+  bool save_keyframes_incrementally_ = false;
   double last_lc_time_       = 0.0;
 
   std::shared_ptr<kiss_matcher::LoopClosure> loop_closure_;
@@ -173,6 +200,7 @@ class PoseGraphManager : public rclcpp::Node {
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr loop_detection_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr loop_detection_radius_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr realtime_pose_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr optimized_odom_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_src_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_tgt_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_coarse_aligned_pub_;
@@ -180,6 +208,7 @@ class PoseGraphManager : public rclcpp::Node {
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr debug_cloud_pub_;
 
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_save_flag_;
+  rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr sub_gps_;
 
   // rclcpp::Publisher<pose_graph_tools_msgs::msg::PoseGraph>::SharedPtr loop_closures_pub_;
 
