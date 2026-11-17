@@ -40,7 +40,6 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
       declare_parameter<double>("keyframe.rotation_threshold_deg", 10.0) * M_PI / 180.0;
   keyframe_config.minimum_time_interval_s =
       declare_parameter<double>("keyframe.minimum_time_interval", 0.0);
-  keyframe_selector_ = kiss_matcher_slam::KeyframeSelector(keyframe_config);
   lc_config.num_submap_keyframes_  = declare_parameter<int>("keyframe.num_submap_keyframes", 5);
   lc_config.verbose_               = declare_parameter<bool>("loop.verbose", false);
   lc_config.is_multilayer_env_     = declare_parameter<bool>("loop.is_multilayer_env", false);
@@ -71,9 +70,9 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   scan_context_config.minimum_time_separation_s =
       declare_parameter<double>("scan_context.min_time_separation", 30.0);
 
-  prior_variances_ = declare_parameter<std::vector<double>>(
+  auto prior_variances = declare_parameter<std::vector<double>>(
       "pose_graph.prior_variances", {1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2});
-  odom_variances_ = declare_parameter<std::vector<double>>(
+  auto odom_variances = declare_parameter<std::vector<double>>(
       "pose_graph.odom_variances", {1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2});
   loop_variances_ = declare_parameter<std::vector<double>>(
       "pose_graph.loop_variances", {1e-3, 1e-3, 1e-3, 1e-2, 1e-2, 1e-2});
@@ -89,6 +88,16 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   gps_config.huber_k = declare_parameter<double>("gps_altitude.huber_k", 1.345);
   gps_altitude_manager_ =
       std::make_unique<kiss_matcher_slam::GpsAltitudeManager>(gps_config);
+  kiss_matcher_slam::KeyframeProcessorConfig keyframe_processor_config;
+  keyframe_processor_config.selection = keyframe_config;
+  keyframe_processor_config.prior_variances = std::move(prior_variances);
+  keyframe_processor_config.odometry_variances = std::move(odom_variances);
+  keyframe_processor_ = std::make_unique<kiss_matcher_slam::KeyframeProcessor>(
+      std::move(keyframe_processor_config),
+      map_database_,
+      pose_graph_backend_,
+      *gps_altitude_manager_,
+      runtime_state_);
 
   save_map_bag_         = declare_parameter<bool>("result.save_map_bag", false);
   save_map_pcd_         = declare_parameter<bool>("result.save_map_pcd", false);
@@ -161,9 +170,9 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   product_config.base_frame = base_frame_;
   product_config.save_voxel_resolution = save_voxel_res_;
   product_config.keyframe_translation_threshold_m =
-      keyframe_selector_.config().translation_threshold_m;
+      keyframe_config.translation_threshold_m;
   product_config.keyframe_rotation_threshold_rad =
-      keyframe_selector_.config().rotation_threshold_rad;
+      keyframe_config.rotation_threshold_rad;
   product_config.gps_altitude_enabled = gps_altitude_manager_->enabled();
   product_config.save_keyframes_incrementally = save_keyframes_incrementally_;
   product_config.overwrite_existing = overwrite_existing_product_;
@@ -265,7 +274,7 @@ void PoseGraphManager::appendKeyframePose(const PoseGraphNode &node) {
 
 void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg,
                                     const sensor_msgs::msg::PointCloud2::ConstSharedPtr &scan_msg) {
-  const size_t latest_keyframe_idx = runtime_state_.nextKeyframeId();
+  const size_t latest_keyframe_idx = keyframe_processor_->nextKeyframeId();
 
   // NOTE(hlim): For clarification, 'current' refers to the real-time incoming messages,
   // while 'latest' indicates the last keyframe stored in map_database_.
@@ -274,87 +283,33 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
       *odom_msg, *scan_msg, latest_keyframe_idx, scan_voxel_res_, store_voxelized_scan_);
 
   kiss_matcher::TicToc total_timer;
-  kiss_matcher::TicToc local_timer;
 
   visualizeCurrentData(current_odom, odom_msg->header.stamp, scan_msg->header.frame_id);
 
-  if (!runtime_state_.initialized()) {
-    map_database_.append(current_frame_);
+  const auto keyframe_result = keyframe_processor_->process(current_frame_);
+  if (keyframe_result.initialized_session) {
     appendKeyframePose(current_frame_);
     saveKeyframeIncrementally(current_frame_);
-
-    pose_graph_backend_.addPrior(
-        latest_keyframe_idx, eigenToGtsam(current_frame_.pose_), prior_variances_);
-    runtime_state_.commitKeyframe();
-
     RCLCPP_INFO(this->get_logger(), "The first node comes. Initialization complete.");
-
-  } else {
-    const auto t_keyframe_processing = local_timer.toc();
-    const auto latest_keyframe = map_database_.latest();
-    if (keyframe_selector_.shouldCreate(current_frame_.pose_corrected_,
-                                        current_frame_.timestamp_,
-                                        latest_keyframe.optimized_pose,
-                                        latest_keyframe.timestamp)) {
-      map_database_.append(current_frame_);
-      saveKeyframeIncrementally(current_frame_);
-
-      gtsam::Pose3 pose_from = eigenToGtsam(latest_keyframe.optimized_pose);
-      gtsam::Pose3 pose_to   = eigenToGtsam(current_frame_.pose_corrected_);
-
-      pose_graph_backend_.addOdometry(latest_keyframe_idx - 1,
-                                      latest_keyframe_idx,
-                                      pose_from.between(pose_to),
-                                      pose_to,
-                                      odom_variances_);
-
-      const auto gps_constraint =
-          gps_altitude_manager_->constraint(current_frame_.timestamp_, current_frame_.pose_corrected_);
-      if (gps_constraint) {
-        pose_graph_backend_.addGps(
-            latest_keyframe_idx,
-            gtsam::Point3(gps_constraint->position.x(),
-                          gps_constraint->position.y(),
-                          gps_constraint->position.z()),
-            gps_constraint->variances,
-            gps_constraint->huber_k);
-      }
-
-      runtime_state_.commitKeyframe();
-      appendKeyframePose(current_frame_);
-
-      local_timer.tic();
-      const auto optimization = pose_graph_backend_.optimize();
-      const auto t_optim = local_timer.toc();
-
-      realtime_pose_tracker_.applyCorrection(
-          gtsamToEigen(optimization.estimates.at<gtsam::Pose3>(optimization.estimates.size() - 1)));
-      if (optimization.loop_constraints_applied) {
-        std::vector<kiss_matcher_slam::MapDatabase::PoseUpdate> pose_updates;
-        pose_updates.reserve(optimization.estimates.size());
-        for (size_t i = 0; i < optimization.estimates.size(); ++i) {
-          pose_updates.emplace_back(
-              i, gtsamToEigen(optimization.estimates.at<gtsam::Pose3>(i)));
-        }
-        if (!map_database_.updateOptimizedPoses(pose_updates)) {
-          throw std::runtime_error("pose graph result does not match the map database");
-        }
-        runtime_state_.requestMapRebuild();
-        runtime_state_.requestGraphRefresh();
-      }
-      writeTrajectoryProducts();
-
-      const auto t_total = total_timer.toc();
-
-      RCLCPP_INFO(
-          this->get_logger(),
-          "# of Keyframes: %zu. Timing (msec) → Total: %.1f | Keyframe: %.1f | Optim.: %.1f",
-          map_database_.size(),
-          t_total,
-          t_keyframe_processing,
-          t_optim);
-    }
+    return;
   }
+  if (!keyframe_result.accepted) return;
+
+  saveKeyframeIncrementally(current_frame_);
+  appendKeyframePose(current_frame_);
+  realtime_pose_tracker_.applyCorrection(keyframe_result.latest_optimized_pose);
+  writeTrajectoryProducts();
+
+  const auto t_total = total_timer.toc();
+  const auto t_keyframe_processing =
+      std::max(0.0, t_total - keyframe_result.optimization_time_ms);
+  RCLCPP_INFO(
+      this->get_logger(),
+      "# of Keyframes: %zu. Timing (msec) → Total: %.1f | Keyframe: %.1f | Optim.: %.1f",
+      map_database_.size(),
+      t_total,
+      t_keyframe_processing,
+      keyframe_result.optimization_time_ms);
 }
 
 // void PoseGraphManager::loopPubTimerFunc()

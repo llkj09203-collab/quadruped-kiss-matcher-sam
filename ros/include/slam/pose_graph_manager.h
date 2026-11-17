@@ -49,6 +49,7 @@
 #include "../tictoc.hpp"
 #include "kiss_matcher_slam/core/gps_altitude_manager.hpp"
 #include "kiss_matcher_slam/core/incremental_map_builder.hpp"
+#include "kiss_matcher_slam/core/keyframe_processor.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
 #include "kiss_matcher_slam/core/loop_candidate_queue.hpp"
 #include "kiss_matcher_slam/core/map_database.hpp"
@@ -113,6 +114,7 @@ class PoseGraphManager : public rclcpp::Node {
   kiss_matcher::PoseGraphNode current_frame_;
   kiss_matcher_slam::MappingRuntimeState runtime_state_;
   kiss_matcher_slam::MapDatabase map_database_;
+  std::unique_ptr<kiss_matcher_slam::KeyframeProcessor> keyframe_processor_;
   std::unique_ptr<kiss_matcher_slam::MapProductWriter> map_product_writer_;
   kiss_matcher_slam::RealtimePoseTracker realtime_pose_tracker_;
   kiss_matcher_slam::VisualizationState visualization_state_;
@@ -123,7 +125,6 @@ class PoseGraphManager : public rclcpp::Node {
 
   kiss_matcher_slam::PoseGraphBackend pose_graph_backend_;
 
-  kiss_matcher_slam::KeyframeSelector keyframe_selector_;
   double scan_voxel_res_;
   double map_voxel_res_;
   double save_voxel_res_;
@@ -131,8 +132,6 @@ class PoseGraphManager : public rclcpp::Node {
   double loop_detection_radius_;  // Only for visualization
   int sub_key_num_;
 
-  std::vector<double> prior_variances_;
-  std::vector<double> odom_variances_;
   std::vector<double> loop_variances_;
   double loop_huber_k_ = 1.345;
   bool adaptive_loop_noise_ = true;
