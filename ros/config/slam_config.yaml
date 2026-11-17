@@ -94,3 +94,4 @@
       seq_name: "sequence"
       output_directory: "maps"
       save_keyframes_incrementally: true
+      overwrite_existing: false       # Refuse to erase an existing session unless explicitly enabled

@@ -1,5 +1,7 @@
 #include "slam/pose_graph_manager.h"
 
+#include <filesystem>
+
 using namespace kiss_matcher;
 
 PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
@@ -87,18 +89,18 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   save_map_bag_         = declare_parameter<bool>("result.save_map_bag", false);
   save_map_pcd_         = declare_parameter<bool>("result.save_map_pcd", false);
   save_in_kitti_format_ = declare_parameter<bool>("result.save_in_kitti_format", false);
-  seq_name_             = declare_parameter<std::string>("result.seq_name", "");
+  seq_name_             = declare_parameter<std::string>("result.seq_name", "sequence");
   output_directory_ = declare_parameter<std::string>("result.output_directory", "maps");
   save_keyframes_incrementally_ =
       declare_parameter<bool>("result.save_keyframes_incrementally", false);
+  overwrite_existing_product_ =
+      declare_parameter<bool>("result.overwrite_existing", false);
 
   rclcpp::QoS qos(1);
   qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
   qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
 
   tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
-
-  package_path_ = "";
 
   loop_closure_          = std::make_shared<LoopClosure>(lc_config, this->get_logger());
   loop_detection_radius_ = lc_config.loop_detection_radius_;
@@ -151,22 +153,22 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
         std::bind(&PoseGraphManager::gpsCallback, this, std::placeholders::_1));
   }
 
-  if (save_keyframes_incrementally_) {
-    const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
-    fs::create_directories(sequence_dir / "keyframes");
-    std::ofstream metadata(sequence_dir / "metadata.yaml");
-    metadata << "format_version: 1\n"
-             << "sequence: " << seq_name_ << "\n"
-             << "map_frame: " << map_frame_ << "\n"
-             << "base_frame: " << base_frame_ << "\n"
-             << "pointcloud_frame: lidar\n"
-             << "trajectory_format: tum\n"
-             << "keyframe_translation_threshold_m: "
-             << keyframe_selector_.config().translation_threshold_m << "\n"
-             << "keyframe_rotation_threshold_deg: "
-             << keyframe_selector_.config().rotation_threshold_rad * 180.0 / M_PI << "\n"
-             << "gps_altitude_enabled: " << (use_gps_altitude_ ? "true" : "false") << "\n";
-  }
+  kiss_matcher_slam::MapProductConfig product_config;
+  product_config.output_directory = output_directory_;
+  product_config.sequence = seq_name_;
+  product_config.map_frame = map_frame_;
+  product_config.base_frame = base_frame_;
+  product_config.save_voxel_resolution = save_voxel_res_;
+  product_config.keyframe_translation_threshold_m =
+      keyframe_selector_.config().translation_threshold_m;
+  product_config.keyframe_rotation_threshold_rad =
+      keyframe_selector_.config().rotation_threshold_rad;
+  product_config.gps_altitude_enabled = use_gps_altitude_;
+  product_config.save_keyframes_incrementally = save_keyframes_incrementally_;
+  product_config.overwrite_existing = overwrite_existing_product_;
+  map_product_writer_ =
+      std::make_unique<kiss_matcher_slam::MapProductWriter>(std::move(product_config));
+  map_product_writer_->initialize();
 
   // hydra_loop_timer_ = this->create_wall_timer(
   //   std::chrono::duration<double>(1.0 / loop_pub_hz),
@@ -215,18 +217,15 @@ PoseGraphManager::~PoseGraphManager() {
   }
   const auto keyframes = map_database_.snapshot();
   if (save_map_pcd_ && !keyframes.empty()) {
-    pcl::PointCloud<PointType>::Ptr corrected_map(new pcl::PointCloud<PointType>());
-    corrected_map->reserve(keyframes.front().cloud.size() * keyframes.size());
-    for (const auto &keyframe : keyframes) {
-      *corrected_map += transformPcd(keyframe.cloud, keyframe.optimized_pose);
+    try {
+      map_product_writer_->writeMap(keyframes, true);
+      writeTrajectoryProducts();
+      RCLCPP_INFO(this->get_logger(),
+                  "Mapping data product saved to %s",
+                  map_product_writer_->sequenceDirectory().c_str());
+    } catch (const std::exception &error) {
+      RCLCPP_ERROR(this->get_logger(), "Failed to save mapping data product: %s", error.what());
     }
-    const auto &voxelized_map = voxelize(corrected_map, save_voxel_res_);
-    const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
-    fs::create_directories(sequence_dir);
-    const fs::path map_path = sequence_dir / (seq_name_ + "_map.pcd");
-    pcl::io::savePCDFileBinary<PointType>(map_path.string(), *voxelized_map);
-    writeTrajectoryProducts();
-    RCLCPP_INFO(this->get_logger(), "Mapping data product saved to %s", sequence_dir.c_str());
   }
 }
 
@@ -240,42 +239,19 @@ void PoseGraphManager::gpsCallback(const sensor_msgs::msg::NavSatFix::ConstShare
 }
 
 void PoseGraphManager::saveKeyframeIncrementally(const PoseGraphNode &node) {
-  if (!save_keyframes_incrementally_) return;
-  const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
-  const fs::path keyframe_dir = sequence_dir / "keyframes";
-  fs::create_directories(keyframe_dir);
-
-  std::ostringstream filename;
-  filename << std::setw(6) << std::setfill('0') << node.idx_ << ".pcd";
-  pcl::io::savePCDFileBinary<PointType>((keyframe_dir / filename.str()).string(), node.scan_);
-
-  std::ofstream timestamp_file(sequence_dir / "timestamps.txt", std::ios::app);
-  timestamp_file << node.idx_ << " " << std::fixed << std::setprecision(9) << node.timestamp_ << "\n";
-
-  std::ofstream odom_file(sequence_dir / "odometry_tum.txt", std::ios::app);
-  const auto pose = eigenToPoseStamped(node.pose_, map_frame_);
-  odom_file << std::fixed << std::setprecision(9) << node.timestamp_ << " "
-            << pose.pose.position.x << " " << pose.pose.position.y << " " << pose.pose.position.z
-            << " " << pose.pose.orientation.x << " " << pose.pose.orientation.y << " "
-            << pose.pose.orientation.z << " " << pose.pose.orientation.w << "\n";
+  map_product_writer_->appendKeyframe(node);
 }
 
 void PoseGraphManager::writeTrajectoryProducts() {
   const auto estimates = pose_graph_backend_.estimates();
-  if (!save_keyframes_incrementally_ || estimates.empty()) return;
-  const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
-  fs::create_directories(sequence_dir);
-  std::ofstream optimized_file(sequence_dir / "optimized_trajectory_tum.txt");
-  optimized_file << "# timestamp x y z qx qy qz qw\n";
+  if (estimates.empty()) return;
   const auto keyframes = map_database_.snapshot();
-  for (size_t i = 0; i < keyframes.size() && i < estimates.size(); ++i) {
-    const auto pose = gtsamToPoseStamped(estimates.at<gtsam::Pose3>(i), map_frame_);
-    optimized_file << std::fixed << std::setprecision(9) << keyframes[i].timestamp << " "
-                   << pose.pose.position.x << " " << pose.pose.position.y << " "
-                   << pose.pose.position.z << " " << pose.pose.orientation.x << " "
-                   << pose.pose.orientation.y << " " << pose.pose.orientation.z << " "
-                   << pose.pose.orientation.w << "\n";
+  std::vector<Eigen::Matrix4d> optimized_poses;
+  optimized_poses.reserve(estimates.size());
+  for (size_t i = 0; i < estimates.size(); ++i) {
+    optimized_poses.push_back(gtsamToEigen(estimates.at<gtsam::Pose3>(i)));
   }
+  map_product_writer_->writeOptimizedTrajectory(keyframes, optimized_poses);
 }
 
 void PoseGraphManager::appendKeyframePose(const PoseGraphNode &node) {
@@ -719,69 +695,34 @@ visualization_msgs::msg::Marker PoseGraphManager::visualizeLoopDetectionRadius(
 }
 
 void PoseGraphManager::saveFlagCallback(const std_msgs::msg::String::ConstSharedPtr &msg) {
-  std::string save_dir        = !msg->data.empty() ? msg->data : package_path_;
-  std::string seq_directory   = save_dir + "/" + seq_name_;
-  std::string scans_directory = seq_directory + "/scans";
+  const std::filesystem::path save_dir =
+      !msg->data.empty() ? std::filesystem::path(msg->data)
+                         : std::filesystem::path(output_directory_);
   const auto keyframes = map_database_.snapshot();
-
-  if (save_in_kitti_format_) {
-    RCLCPP_INFO(this->get_logger(),
-                "Scans are saved in %s, following the KITTI and TUM format",
-                scans_directory.c_str());
-
-    if (fs::exists(seq_directory)) {
-      fs::remove_all(seq_directory);
-    }
-    fs::create_directories(scans_directory);
-
-    std::ofstream kitti_pose_file(seq_directory + "/poses_kitti.txt");
-    std::ofstream tum_pose_file(seq_directory + "/poses_tum.txt");
-    tum_pose_file << "#timestamp x y z qx qy qz qw\n";
-
-      for (size_t i = 0; i < keyframes.size(); ++i) {
-        std::stringstream ss_;
-        ss_ << scans_directory << "/" << std::setw(6) << std::setfill('0') << i << ".pcd";
-        RCLCPP_INFO(this->get_logger(), "Saving %s...", ss_.str().c_str());
-        pcl::io::savePCDFileASCII<PointType>(ss_.str(), keyframes[i].cloud);
-
-        const auto &pose_ = keyframes[i].optimized_pose;
-        kitti_pose_file << pose_(0, 0) << " " << pose_(0, 1) << " " << pose_(0, 2) << " "
-                        << pose_(0, 3) << " " << pose_(1, 0) << " " << pose_(1, 1) << " "
-                        << pose_(1, 2) << " " << pose_(1, 3) << " " << pose_(2, 0) << " "
-                        << pose_(2, 1) << " " << pose_(2, 2) << " " << pose_(2, 3) << "\n";
-
-        const auto &lidar_optim_pose_ = eigenToPoseStamped(keyframes[i].optimized_pose, map_frame_);
-        tum_pose_file << std::fixed << std::setprecision(8) << keyframes[i].timestamp << " "
-                      << lidar_optim_pose_.pose.position.x << " "
-                      << lidar_optim_pose_.pose.position.y << " "
-                      << lidar_optim_pose_.pose.position.z << " "
-                      << lidar_optim_pose_.pose.orientation.x << " "
-                      << lidar_optim_pose_.pose.orientation.y << " "
-                      << lidar_optim_pose_.pose.orientation.z << " "
-                      << lidar_optim_pose_.pose.orientation.w << "\n";
-    }
-    kitti_pose_file.close();
-    tum_pose_file.close();
-    RCLCPP_INFO(this->get_logger(), "Scans and poses saved in .pcd and KITTI format");
+  if (keyframes.empty()) {
+    RCLCPP_WARN(this->get_logger(), "No keyframes available; skipping map product save");
+    return;
   }
-  if (save_map_bag_) {
-    RCLCPP_INFO(this->get_logger(),
-                "NOTE(hlim): rosbag2 saving not directly implemented; skipping.");
-  }
-  if (save_map_pcd_) {
-    if (keyframes.empty()) {
-      RCLCPP_WARN(this->get_logger(), "No keyframes available; skipping map save");
-      return;
+
+  try {
+    if (save_in_kitti_format_) {
+      const auto directory = map_product_writer_->writeKittiDataset(keyframes, save_dir);
+      RCLCPP_INFO(this->get_logger(),
+                  "Scans and poses saved in PCD, KITTI and TUM format below %s",
+                  directory.c_str());
     }
-    pcl::PointCloud<PointType>::Ptr corrected_map(new pcl::PointCloud<PointType>());
-    corrected_map->reserve(keyframes.front().cloud.size() * keyframes.size());
-    for (const auto &keyframe : keyframes) {
-      *corrected_map += transformPcd(keyframe.cloud, keyframe.optimized_pose);
+    if (save_map_bag_) {
+      RCLCPP_INFO(this->get_logger(),
+                  "NOTE(hlim): rosbag2 saving not directly implemented; skipping.");
     }
-    const auto &voxelized_map = voxelize(corrected_map, save_voxel_res_);
-    pcl::io::savePCDFileASCII<PointType>(seq_directory + "/" + seq_name_ + "_map.pcd",
-                                         *voxelized_map);
-    RCLCPP_INFO(this->get_logger(), "Accumulated map cloud saved in .pcd format");
+    if (save_map_pcd_) {
+      const auto path = map_product_writer_->writeMap(keyframes, save_dir, false);
+      RCLCPP_INFO(this->get_logger(), "Accumulated map cloud saved to %s", path.c_str());
+    }
+  } catch (const std::exception &error) {
+    RCLCPP_ERROR(this->get_logger(),
+                 "Map product save request failed without changing the running map: %s",
+                 error.what());
   }
 }
 

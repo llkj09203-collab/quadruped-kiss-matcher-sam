@@ -7,8 +7,6 @@
 #include <cmath>
 #include <ctime>
 #include <deque>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -52,6 +50,7 @@
 #include "../tictoc.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
 #include "kiss_matcher_slam/core/map_database.hpp"
+#include "kiss_matcher_slam/core/map_product_writer.hpp"
 #include "kiss_matcher_slam/core/pose_graph_backend.hpp"
 #include "kiss_matcher_slam/core/scan_context_loop_detector.hpp"
 #include "slam/loop_closure.h"
@@ -60,7 +59,6 @@
 
 // #include <pose_graph_tools_msgs/msg/pose_graph.hpp>
 
-namespace fs = std::filesystem;
 using namespace std::chrono;
 typedef message_filters::sync_policies::ApproximateTime<nav_msgs::msg::Odometry,
                                                         sensor_msgs::msg::PointCloud2>
@@ -103,7 +101,6 @@ class PoseGraphManager : public rclcpp::Node {
 
   std::string map_frame_;
   std::string base_frame_;
-  std::string package_path_;
   std::string seq_name_;
   std::string output_directory_;
 
@@ -116,6 +113,7 @@ class PoseGraphManager : public rclcpp::Node {
   Eigen::Matrix4d odom_delta_          = Eigen::Matrix4d::Identity();
   kiss_matcher::PoseGraphNode current_frame_;
   kiss_matcher_slam::MapDatabase map_database_;
+  std::unique_ptr<kiss_matcher_slam::MapProductWriter> map_product_writer_;
 
   bool is_initialized_           = false;
   bool need_map_update_          = false;
@@ -165,6 +163,7 @@ class PoseGraphManager : public rclcpp::Node {
   bool save_map_pcd_         = false;
   bool save_in_kitti_format_ = false;
   bool save_keyframes_incrementally_ = false;
+  bool overwrite_existing_product_ = false;
   double last_lc_time_       = 0.0;
 
   std::shared_ptr<kiss_matcher::LoopClosure> loop_closure_;

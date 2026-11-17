@@ -26,3 +26,7 @@ The point clouds and trajectory files form one atomic data product: do not copy 
 map without its keyframes, timestamps, trajectory, and metadata. GPS altitude is
 stored only as a graph constraint; latitude and longitude are not used as global
 map coordinates.
+
+To protect previous maps, startup fails when the target session directory already
+contains data. Use a new `result.seq_name`, or explicitly set
+`result.overwrite_existing: true` when replacing that session is intentional.
