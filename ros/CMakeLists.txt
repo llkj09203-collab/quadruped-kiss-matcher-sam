@@ -78,6 +78,7 @@ add_library(kiss_matcher_slam_core
   src/core/keyframe_processor.cpp
   src/core/keyframe_selector.cpp
   src/core/loop_candidate_queue.cpp
+  src/core/loop_constraint_processor.cpp
   src/core/map_database.cpp
   src/core/mapping_runtime_state.cpp
   src/core/map_product_writer.cpp
@@ -185,6 +186,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_loop_candidate_queue test/test_loop_candidate_queue.cpp)
   target_include_directories(test_loop_candidate_queue PRIVATE include)
   target_link_libraries(test_loop_candidate_queue kiss_matcher_slam_core)
+
+  ament_add_gtest(test_loop_constraint_processor test/test_loop_constraint_processor.cpp)
+  target_include_directories(test_loop_constraint_processor PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_loop_constraint_processor kiss_matcher_slam_core ${PCL_LIBRARIES} gtsam)
 
   ament_add_gtest(test_mapping_runtime_state test/test_mapping_runtime_state.cpp)
   target_include_directories(test_mapping_runtime_state PRIVATE include)

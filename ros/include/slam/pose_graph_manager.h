@@ -52,6 +52,7 @@
 #include "kiss_matcher_slam/core/keyframe_processor.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
 #include "kiss_matcher_slam/core/loop_candidate_queue.hpp"
+#include "kiss_matcher_slam/core/loop_constraint_processor.hpp"
 #include "kiss_matcher_slam/core/map_database.hpp"
 #include "kiss_matcher_slam/core/mapping_runtime_state.hpp"
 #include "kiss_matcher_slam/core/map_product_writer.hpp"
@@ -118,6 +119,7 @@ class PoseGraphManager : public rclcpp::Node {
   std::unique_ptr<kiss_matcher_slam::MapProductWriter> map_product_writer_;
   kiss_matcher_slam::RealtimePoseTracker realtime_pose_tracker_;
   kiss_matcher_slam::VisualizationState visualization_state_;
+  std::unique_ptr<kiss_matcher_slam::LoopConstraintProcessor> loop_constraint_processor_;
   std::unique_ptr<kiss_matcher_slam::GpsAltitudeManager> gps_altitude_manager_;
   std::unique_ptr<kiss_matcher_slam::IncrementalMapBuilder> map_builder_;
 
@@ -131,10 +133,6 @@ class PoseGraphManager : public rclcpp::Node {
   double loop_pub_delayed_time_;
   double loop_detection_radius_;  // Only for visualization
   int sub_key_num_;
-
-  std::vector<double> loop_variances_;
-  double loop_huber_k_ = 1.345;
-  bool adaptive_loop_noise_ = true;
 
   size_t succeeded_query_idx_ = 0;
   // pose_graph_tools_msgs::msg::PoseGraph loop_msgs_;

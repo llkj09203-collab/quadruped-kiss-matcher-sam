@@ -74,10 +74,19 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
       "pose_graph.prior_variances", {1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2});
   auto odom_variances = declare_parameter<std::vector<double>>(
       "pose_graph.odom_variances", {1e-4, 1e-4, 1e-4, 1e-2, 1e-2, 1e-2});
-  loop_variances_ = declare_parameter<std::vector<double>>(
+  kiss_matcher_slam::LoopConstraintConfig loop_constraint_config;
+  loop_constraint_config.base_variances = declare_parameter<std::vector<double>>(
       "pose_graph.loop_variances", {1e-3, 1e-3, 1e-3, 1e-2, 1e-2, 1e-2});
-  loop_huber_k_ = declare_parameter<double>("pose_graph.loop_huber_k", 1.345);
-  adaptive_loop_noise_ = declare_parameter<bool>("pose_graph.adaptive_loop_noise", true);
+  loop_constraint_config.huber_k =
+      declare_parameter<double>("pose_graph.loop_huber_k", 1.345);
+  loop_constraint_config.adaptive_noise =
+      declare_parameter<bool>("pose_graph.adaptive_loop_noise", true);
+  loop_constraint_processor_ =
+      std::make_unique<kiss_matcher_slam::LoopConstraintProcessor>(
+          std::move(loop_constraint_config),
+          pose_graph_backend_,
+          visualization_state_,
+          runtime_state_);
 
   kiss_matcher_slam::GpsAltitudeConfig gps_config;
   gps_config.enabled = declare_parameter<bool>("gps_altitude.enable", false);
@@ -400,23 +409,10 @@ void PoseGraphManager::performRegistration() {
 
   if (reg_output.is_valid_) {
     RCLCPP_INFO(this->get_logger(), "LC accepted. Overlapness: %.3f", reg_output.overlapness_);
-    gtsam::Pose3 pose_from =
-        eigenToGtsam(reg_output.pose_ * stored_keyframes[query_idx].optimized_pose);
-    gtsam::Pose3 pose_to = eigenToGtsam(stored_keyframes[match_idx].optimized_pose);
-
-    std::vector<double> loop_variances = loop_variances_;
-    if (adaptive_loop_noise_) {
-      const double confidence = std::clamp(reg_output.overlapness_ / 100.0, 0.1, 1.0);
-      const double scale = 1.0 / (confidence * confidence);
-      for (auto &variance : loop_variances) variance *= scale;
-    }
-    pose_graph_backend_.addLoop(
-        query_idx, match_idx, pose_from.between(pose_to), loop_variances, loop_huber_k_);
-
-    visualization_state_.addLoopEdge(query_idx, match_idx);
+    loop_constraint_processor_->apply(
+        {query_idx, match_idx, reg_output.pose_, reg_output.overlapness_}, stored_keyframes);
     succeeded_query_idx_      = query_idx;
     need_lc_cloud_vis_update_ = true;
-    runtime_state_.requestGraphRefresh();
 
     // --------------------------------------------------
     // TODO(hlim): resurrect pose_graph_tools_msgs
