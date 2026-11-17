@@ -75,10 +75,11 @@ find_package(GTSAM REQUIRED)
 add_library(kiss_matcher_slam_core
   src/core/keyframe_selector.cpp
   src/core/map_database.cpp
+  src/core/pose_graph_backend.cpp
   src/core/scan_context_loop_detector.cpp
 )
 target_include_directories(kiss_matcher_slam_core PUBLIC include ${PCL_INCLUDE_DIRS})
-target_link_libraries(kiss_matcher_slam_core ${PCL_LIBRARIES})
+target_link_libraries(kiss_matcher_slam_core ${PCL_LIBRARIES} gtsam)
 
 ################################################################################
 add_executable(run_kiss_matcher src/run_kiss_matcher.cpp)
@@ -164,6 +165,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_database test/test_map_database.cpp)
   target_include_directories(test_map_database PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_map_database kiss_matcher_slam_core ${PCL_LIBRARIES})
+
+  ament_add_gtest(test_pose_graph_backend test/test_pose_graph_backend.cpp)
+  target_include_directories(test_pose_graph_backend PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_pose_graph_backend kiss_matcher_slam_core gtsam)
 
   ament_add_gtest(test_scan_context_loop_detector test/test_scan_context_loop_detector.cpp)
   target_include_directories(test_scan_context_loop_detector PRIVATE include ${PCL_INCLUDE_DIRS})

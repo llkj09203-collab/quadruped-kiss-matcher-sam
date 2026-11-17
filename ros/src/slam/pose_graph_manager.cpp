@@ -106,11 +106,6 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   scan_context_detector_ =
       std::make_unique<kiss_matcher_slam::ScanContextLoopDetector>(scan_context_config);
 
-  gtsam::ISAM2Params isam_params_;
-  isam_params_.relinearizeThreshold = 0.01;
-  isam_params_.relinearizeSkip      = 1;
-  isam_handler_                     = std::make_shared<gtsam::ISAM2>(isam_params_);
-
   odom_path_.header.frame_id      = map_frame_;
   corrected_path_.header.frame_id = map_frame_;
 
@@ -235,16 +230,6 @@ PoseGraphManager::~PoseGraphManager() {
   }
 }
 
-gtsam::noiseModel::Diagonal::shared_ptr PoseGraphManager::diagonalNoise(
-    const std::vector<double> &variances) const {
-  if (variances.size() != 6) {
-    throw std::invalid_argument("Pose graph variance arrays must contain exactly 6 values");
-  }
-  gtsam::Vector6 values;
-  for (size_t i = 0; i < 6; ++i) values(static_cast<Eigen::Index>(i)) = variances[i];
-  return gtsam::noiseModel::Diagonal::Variances(values);
-}
-
 void PoseGraphManager::gpsCallback(const sensor_msgs::msg::NavSatFix::ConstSharedPtr msg) {
   if (msg->status.status < sensor_msgs::msg::NavSatStatus::STATUS_FIX ||
       !std::isfinite(msg->altitude)) {
@@ -276,14 +261,15 @@ void PoseGraphManager::saveKeyframeIncrementally(const PoseGraphNode &node) {
 }
 
 void PoseGraphManager::writeTrajectoryProducts() {
-  if (!save_keyframes_incrementally_ || corrected_esti_.empty()) return;
+  const auto estimates = pose_graph_backend_.estimates();
+  if (!save_keyframes_incrementally_ || estimates.empty()) return;
   const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
   fs::create_directories(sequence_dir);
   std::ofstream optimized_file(sequence_dir / "optimized_trajectory_tum.txt");
   optimized_file << "# timestamp x y z qx qy qz qw\n";
   const auto keyframes = map_database_.snapshot();
-  for (size_t i = 0; i < keyframes.size() && i < corrected_esti_.size(); ++i) {
-    const auto pose = gtsamToPoseStamped(corrected_esti_.at<gtsam::Pose3>(i), map_frame_);
+  for (size_t i = 0; i < keyframes.size() && i < estimates.size(); ++i) {
+    const auto pose = gtsamToPoseStamped(estimates.at<gtsam::Pose3>(i), map_frame_);
     optimized_file << std::fixed << std::setprecision(9) << keyframes[i].timestamp << " "
                    << pose.pose.position.x << " " << pose.pose.position.y << " "
                    << pose.pose.position.z << " " << pose.pose.orientation.x << " "
@@ -323,12 +309,8 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
     appendKeyframePose(current_frame_);
     saveKeyframeIncrementally(current_frame_);
 
-    auto prior_noise = diagonalNoise(prior_variances_);
-
-    gtsam_graph_.add(
-        gtsam::PriorFactor<gtsam::Pose3>(0, eigenToGtsam(current_frame_.pose_), prior_noise));
-
-    init_esti_.insert(latest_keyframe_idx, eigenToGtsam(current_frame_.pose_));
+    pose_graph_backend_.addPrior(
+        latest_keyframe_idx, eigenToGtsam(current_frame_.pose_), prior_variances_);
     ++latest_keyframe_idx;
     is_initialized_ = true;
 
@@ -344,42 +326,36 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
       map_database_.append(current_frame_);
       saveKeyframeIncrementally(current_frame_);
 
-      auto odom_noise = diagonalNoise(odom_variances_);
-
       gtsam::Pose3 pose_from = eigenToGtsam(latest_keyframe.optimized_pose);
       gtsam::Pose3 pose_to   = eigenToGtsam(current_frame_.pose_corrected_);
 
-      {
-        std::lock_guard<std::mutex> lock(graph_mutex_);
-        gtsam_graph_.add(gtsam::BetweenFactor<gtsam::Pose3>(
-            latest_keyframe_idx - 1, latest_keyframe_idx, pose_from.between(pose_to), odom_noise));
+      pose_graph_backend_.addOdometry(latest_keyframe_idx - 1,
+                                      latest_keyframe_idx,
+                                      pose_from.between(pose_to),
+                                      pose_to,
+                                      odom_variances_);
 
-        if (use_gps_altitude_) {
-          sensor_msgs::msg::NavSatFix::ConstSharedPtr gps;
-          {
-            std::lock_guard<std::mutex> gps_lock(gps_mutex_);
-            gps = latest_gps_;
-          }
-          if (gps) {
-            const double gps_stamp = rclcpp::Time(gps->header.stamp).seconds();
-            if (std::abs(gps_stamp - current_frame_.timestamp_) <= gps_time_tolerance_) {
-              if (!gps_origin_initialized_) {
-                gps_altitude_origin_ = gps->altitude - pose_to.z();
-                gps_origin_initialized_ = true;
-              }
-              gtsam::Vector3 gps_variances;
-              gps_variances << gps_xy_variance_, gps_xy_variance_, gps_z_variance_;
-              auto base_noise = gtsam::noiseModel::Diagonal::Variances(gps_variances);
-              auto robust_noise = gtsam::noiseModel::Robust::Create(
-                  gtsam::noiseModel::mEstimator::Huber::Create(gps_huber_k_), base_noise);
-              const gtsam::Point3 measurement(
-                  pose_to.x(), pose_to.y(), gps->altitude - gps_altitude_origin_);
-              gtsam_graph_.add(
-                  gtsam::GPSFactor(latest_keyframe_idx, measurement, robust_noise));
+      if (use_gps_altitude_) {
+        sensor_msgs::msg::NavSatFix::ConstSharedPtr gps;
+        {
+          std::lock_guard<std::mutex> gps_lock(gps_mutex_);
+          gps = latest_gps_;
+        }
+        if (gps) {
+          const double gps_stamp = rclcpp::Time(gps->header.stamp).seconds();
+          if (std::abs(gps_stamp - current_frame_.timestamp_) <= gps_time_tolerance_) {
+            if (!gps_origin_initialized_) {
+              gps_altitude_origin_ = gps->altitude - pose_to.z();
+              gps_origin_initialized_ = true;
             }
+            gtsam::Vector3 gps_variances;
+            gps_variances << gps_xy_variance_, gps_xy_variance_, gps_z_variance_;
+            const gtsam::Point3 measurement(
+                pose_to.x(), pose_to.y(), gps->altitude - gps_altitude_origin_);
+            pose_graph_backend_.addGps(
+                latest_keyframe_idx, measurement, gps_variances, gps_huber_k_);
           }
         }
-        init_esti_.insert(latest_keyframe_idx, pose_to);
       }
 
       ++latest_keyframe_idx;
@@ -389,37 +365,25 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
       }
 
       local_timer.tic();
-      {
-        std::lock_guard<std::mutex> lock(graph_mutex_);
-        isam_handler_->update(gtsam_graph_, init_esti_);
-        isam_handler_->update();
-        if (loop_closure_added_) {
-          isam_handler_->update();
-          isam_handler_->update();
-          isam_handler_->update();
-        }
-        gtsam_graph_.resize(0);
-        init_esti_.clear();
-      }
+      const auto optimization = pose_graph_backend_.optimize();
       const auto t_optim = local_timer.toc();
 
       {
         std::lock_guard<std::mutex> lock(realtime_pose_mutex_);
-        corrected_esti_ = isam_handler_->calculateEstimate();
         last_corrected_pose_ =
-            gtsamToEigen(corrected_esti_.at<gtsam::Pose3>(corrected_esti_.size() - 1));
+            gtsamToEigen(optimization.estimates.at<gtsam::Pose3>(optimization.estimates.size() - 1));
         odom_delta_ = Eigen::Matrix4d::Identity();
       }
-      if (loop_closure_added_) {
+      if (optimization.loop_constraints_applied) {
         std::vector<kiss_matcher_slam::MapDatabase::PoseUpdate> pose_updates;
-        pose_updates.reserve(corrected_esti_.size());
-        for (size_t i = 0; i < corrected_esti_.size(); ++i) {
-          pose_updates.emplace_back(i, gtsamToEigen(corrected_esti_.at<gtsam::Pose3>(i)));
+        pose_updates.reserve(optimization.estimates.size());
+        for (size_t i = 0; i < optimization.estimates.size(); ++i) {
+          pose_updates.emplace_back(
+              i, gtsamToEigen(optimization.estimates.at<gtsam::Pose3>(i)));
         }
         if (!map_database_.updateOptimizedPoses(pose_updates)) {
           throw std::runtime_error("pose graph result does not match the map database");
         }
-        loop_closure_added_ = false;
       }
       writeTrajectoryProducts();
 
@@ -556,20 +520,12 @@ void PoseGraphManager::performRegistration() {
       const double scale = 1.0 / (confidence * confidence);
       for (auto &variance : loop_variances) variance *= scale;
     }
-    auto loop_diagonal = diagonalNoise(loop_variances);
-    auto loop_noise = gtsam::noiseModel::Robust::Create(
-        gtsam::noiseModel::mEstimator::Huber::Create(loop_huber_k_), loop_diagonal);
-
-    {
-      std::lock_guard<std::mutex> lock(graph_mutex_);
-      gtsam_graph_.add(gtsam::BetweenFactor<gtsam::Pose3>(
-          query_idx, match_idx, pose_from.between(pose_to), loop_noise));
-    }
+    pose_graph_backend_.addLoop(
+        query_idx, match_idx, pose_from.between(pose_to), loop_variances, loop_huber_k_);
 
     vis_loop_edges_.emplace_back(query_idx, match_idx);
     succeeded_query_idx_      = query_idx;
     need_lc_cloud_vis_update_ = true;
-    loop_closure_added_       = true;
     need_map_update_          = true;
     need_graph_vis_update_    = true;
 
@@ -655,10 +611,7 @@ void PoseGraphManager::visualizePoseGraph() {
     pcl::PointCloud<pcl::PointXYZ> corrected_odoms;
     nav_msgs::msg::Path corrected_path;
 
-    {
-      std::lock_guard<std::mutex> lock(realtime_pose_mutex_);
-      corrected_esti_copied = corrected_esti_;
-    }
+    corrected_esti_copied = pose_graph_backend_.estimates();
     for (size_t i = 0; i < corrected_esti_copied.size(); ++i) {
       gtsam::Pose3 pose_ = corrected_esti_copied.at<gtsam::Pose3>(i);
       corrected_odoms.points.emplace_back(

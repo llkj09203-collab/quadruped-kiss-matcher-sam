@@ -47,18 +47,12 @@
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Rot3.h>
-#include <gtsam/nonlinear/ISAM2.h>
-#include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
-#include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
-#include <gtsam/navigation/GPSFactor.h>
-#include <gtsam/linear/NoiseModel.h>
-#include <gtsam/slam/BetweenFactor.h>
-#include <gtsam/slam/PriorFactor.h>
 
 #include "../tictoc.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
 #include "kiss_matcher_slam/core/map_database.hpp"
+#include "kiss_matcher_slam/core/pose_graph_backend.hpp"
 #include "kiss_matcher_slam/core/scan_context_loop_detector.hpp"
 #include "slam/loop_closure.h"
 #include "slam/pose_graph_node.hpp"
@@ -106,8 +100,6 @@ class PoseGraphManager : public rclcpp::Node {
   void gpsCallback(const sensor_msgs::msg::NavSatFix::ConstSharedPtr msg);
   void saveKeyframeIncrementally(const kiss_matcher::PoseGraphNode &node);
   void writeTrajectoryProducts();
-  gtsam::noiseModel::Diagonal::shared_ptr diagonalNoise(
-      const std::vector<double> &variances) const;
 
   std::string map_frame_;
   std::string base_frame_;
@@ -116,7 +108,6 @@ class PoseGraphManager : public rclcpp::Node {
   std::string output_directory_;
 
   std::mutex realtime_pose_mutex_;
-  std::mutex graph_mutex_;
   std::mutex lc_mutex_;
   std::mutex vis_mutex_;
   std::mutex gps_mutex_;
@@ -127,15 +118,11 @@ class PoseGraphManager : public rclcpp::Node {
   kiss_matcher_slam::MapDatabase map_database_;
 
   bool is_initialized_           = false;
-  bool loop_closure_added_       = false;
   bool need_map_update_          = false;
   bool need_graph_vis_update_    = false;
   bool need_lc_cloud_vis_update_ = false;
 
-  std::shared_ptr<gtsam::ISAM2> isam_handler_ = nullptr;
-  gtsam::NonlinearFactorGraph gtsam_graph_;
-  gtsam::Values init_esti_;
-  gtsam::Values corrected_esti_;
+  kiss_matcher_slam::PoseGraphBackend pose_graph_backend_;
 
   kiss_matcher_slam::KeyframeSelector keyframe_selector_;
   double scan_voxel_res_;
