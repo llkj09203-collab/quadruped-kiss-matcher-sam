@@ -21,7 +21,6 @@ struct PoseGraphNode : public kiss_matcher_slam::Keyframe {
   double &timestamp_ = timestamp;
   size_t &idx_ = id;
   bool &nnsearch_processed_ = proximity_search_processed;
-  bool &loop_detector_processed_ = place_recognition_processed;
 
   PoseGraphNode() = default;
   explicit PoseGraphNode(const kiss_matcher_slam::Keyframe &other)

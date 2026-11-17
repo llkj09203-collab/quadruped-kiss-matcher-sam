@@ -59,8 +59,8 @@
 #include "../tictoc.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
 #include "kiss_matcher_slam/core/map_database.hpp"
+#include "kiss_matcher_slam/core/scan_context_loop_detector.hpp"
 #include "slam/loop_closure.h"
-#include "slam/loop_detector.h"
 #include "slam/pose_graph_node.hpp"
 #include "slam/utils.hpp"
 
@@ -86,7 +86,7 @@ class PoseGraphManager : public rclcpp::Node {
   /**** Timer functions ****/
   // void loopPubTimerFunc();
   void buildMap();
-  void detectLoopClosureByLoopDetector();
+  void detectLoopClosureByScanContext();
   void detectLoopClosureByNNSearch();
 
   void visualizeCurrentData(const Eigen::Matrix4d &current_odom,
@@ -184,7 +184,9 @@ class PoseGraphManager : public rclcpp::Node {
 
   // NOTE(hlim): We do not provide a loop detector implementation directly,
   // but you can plug in your own detector via this interface.
-  std::shared_ptr<kiss_matcher::LoopDetector> loop_detector_;
+  bool scan_context_enabled_ = true;
+  bool scan_context_verbose_ = false;
+  std::unique_ptr<kiss_matcher_slam::ScanContextLoopDetector> scan_context_detector_;
 
   pcl::PointCloud<PointType>::Ptr map_cloud_;
 
@@ -217,7 +219,7 @@ class PoseGraphManager : public rclcpp::Node {
   // Timers
   rclcpp::TimerBase::SharedPtr hydra_loop_timer_;
   rclcpp::TimerBase::SharedPtr map_timer_;
-  rclcpp::TimerBase::SharedPtr loop_detector_timer_;
+  rclcpp::TimerBase::SharedPtr scan_context_timer_;
   rclcpp::TimerBase::SharedPtr loop_nnsearch_timer_;
   rclcpp::TimerBase::SharedPtr graph_vis_timer_;
   rclcpp::TimerBase::SharedPtr lc_reg_timer_;

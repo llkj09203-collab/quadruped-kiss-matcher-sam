@@ -12,7 +12,7 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   double vis_hz;
 
   LoopClosureConfig lc_config;
-  LoopDetectorConfig ld_config;
+  kiss_matcher_slam::ScanContextConfig scan_context_config;
   auto &gc = lc_config.gicp_config_;
   auto &mc = lc_config.matcher_config_;
 
@@ -57,16 +57,16 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   lc_config.num_inliers_threshold_ =
       declare_parameter<int>("global_reg.num_inliers_threshold", 100);
 
-  ld_config.verbose_ = declare_parameter<bool>("scan_context.verbose", false);
-  ld_config.enable_ = declare_parameter<bool>("scan_context.enable", true);
-  ld_config.num_rings_ = declare_parameter<int>("scan_context.num_rings", 20);
-  ld_config.num_sectors_ = declare_parameter<int>("scan_context.num_sectors", 60);
-  ld_config.exclude_recent_ = declare_parameter<int>("scan_context.exclude_recent", 30);
-  ld_config.num_candidates_ = declare_parameter<int>("scan_context.num_candidates", 10);
-  ld_config.max_radius_ = declare_parameter<double>("scan_context.max_radius", 80.0);
-  ld_config.distance_threshold_ =
+  scan_context_verbose_ = declare_parameter<bool>("scan_context.verbose", false);
+  scan_context_enabled_ = declare_parameter<bool>("scan_context.enable", true);
+  scan_context_config.num_rings = declare_parameter<int>("scan_context.num_rings", 20);
+  scan_context_config.num_sectors = declare_parameter<int>("scan_context.num_sectors", 60);
+  scan_context_config.exclude_recent = declare_parameter<int>("scan_context.exclude_recent", 30);
+  scan_context_config.num_candidates = declare_parameter<int>("scan_context.num_candidates", 10);
+  scan_context_config.max_radius_m = declare_parameter<double>("scan_context.max_radius", 80.0);
+  scan_context_config.distance_threshold =
       declare_parameter<double>("scan_context.distance_threshold", 0.18);
-  ld_config.min_time_separation_ =
+  scan_context_config.minimum_time_separation_s =
       declare_parameter<double>("scan_context.min_time_separation", 30.0);
 
   prior_variances_ = declare_parameter<std::vector<double>>(
@@ -103,7 +103,8 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   loop_closure_          = std::make_shared<LoopClosure>(lc_config, this->get_logger());
   loop_detection_radius_ = lc_config.loop_detection_radius_;
 
-  loop_detector_ = std::make_shared<LoopDetector>(ld_config, this->get_logger());
+  scan_context_detector_ =
+      std::make_unique<kiss_matcher_slam::ScanContextLoopDetector>(scan_context_config);
 
   gtsam::ISAM2Params isam_params_;
   isam_params_.relinearizeThreshold = 0.01;
@@ -180,9 +181,9 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   map_timer_ = this->create_wall_timer(std::chrono::duration<double>(1.0 / map_update_hz),
                                        std::bind(&PoseGraphManager::buildMap, this));
 
-  loop_detector_timer_ =
+  scan_context_timer_ =
       this->create_wall_timer(std::chrono::duration<double>(1.0 / loop_detector_hz),
-                              std::bind(&PoseGraphManager::detectLoopClosureByLoopDetector, this));
+                              std::bind(&PoseGraphManager::detectLoopClosureByScanContext, this));
 
   if (enable_loop_nnsearch) {
     loop_nnsearch_timer_ =
@@ -488,26 +489,27 @@ void PoseGraphManager::buildMap() {
   }
 }
 
-void PoseGraphManager::detectLoopClosureByLoopDetector() {
-  if (!is_initialized_ || map_database_.empty()) return;
+void PoseGraphManager::detectLoopClosureByScanContext() {
+  if (!scan_context_enabled_ || !is_initialized_ || map_database_.empty()) return;
   const auto claimed_id = map_database_.claimLatestForPlaceRecognition();
   if (!claimed_id) return;
 
   auto stored_keyframes = map_database_.snapshot();
   stored_keyframes.resize(*claimed_id + 1);
-  std::vector<PoseGraphNode> keyframes;
-  keyframes.reserve(stored_keyframes.size());
-  for (const auto &keyframe : stored_keyframes) keyframes.emplace_back(keyframe);
-  const auto &query = keyframes.back();
+  const auto &query = stored_keyframes.back();
 
-  kiss_matcher::TicToc ld_timer;
-  const auto &loop_idx_pairs = loop_detector_->fetchLoopCandidates(query, keyframes);
-
-  for (const auto &loop_candidate : loop_idx_pairs) {
-    loop_idx_pair_queue_.push(loop_candidate);
+  const auto candidate = scan_context_detector_->detect(query, stored_keyframes);
+  if (candidate) {
+    loop_idx_pair_queue_.emplace(query.id, candidate->keyframe_id);
+    if (scan_context_verbose_) {
+      RCLCPP_INFO(get_logger(),
+                  "Scan Context candidate: query=%zu match=%zu distance=%.3f yaw=%.3f rad",
+                  query.id,
+                  candidate->keyframe_id,
+                  candidate->descriptor_distance,
+                  candidate->yaw_offset_rad);
+    }
   }
-
-  const auto t_ld = ld_timer.toc();
 }
 
 void PoseGraphManager::detectLoopClosureByNNSearch() {

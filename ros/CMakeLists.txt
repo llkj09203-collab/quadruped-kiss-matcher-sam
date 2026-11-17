@@ -75,6 +75,7 @@ find_package(GTSAM REQUIRED)
 add_library(kiss_matcher_slam_core
   src/core/keyframe_selector.cpp
   src/core/map_database.cpp
+  src/core/scan_context_loop_detector.cpp
 )
 target_include_directories(kiss_matcher_slam_core PUBLIC include ${PCL_INCLUDE_DIRS})
 target_link_libraries(kiss_matcher_slam_core ${PCL_LIBRARIES})
@@ -105,8 +106,7 @@ target_link_libraries(registration_visualizer
 )
 
 add_executable(kiss_matcher_sam src/slam/pose_graph_manager.cpp
-                                src/slam/loop_closure.cpp
-                                src/slam/loop_detector.cpp)
+                                src/slam/loop_closure.cpp)
 ament_target_dependencies(kiss_matcher_sam
   rclcpp
   tf2_ros
@@ -164,6 +164,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_map_database test/test_map_database.cpp)
   target_include_directories(test_map_database PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_map_database kiss_matcher_slam_core ${PCL_LIBRARIES})
+
+  ament_add_gtest(test_scan_context_loop_detector test/test_scan_context_loop_detector.cpp)
+  target_include_directories(test_scan_context_loop_detector PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_scan_context_loop_detector kiss_matcher_slam_core ${PCL_LIBRARIES})
 endif()
 
 install(DIRECTORY launch config rviz docs
