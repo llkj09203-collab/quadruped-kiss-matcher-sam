@@ -4,22 +4,38 @@
 #define KISS_MATCHER_POSE_GRAPH_NODE_HPP
 
 #include <string>
+#include <utility>
 
+#include "kiss_matcher_slam/core/keyframe.hpp"
 #include "slam/utils.hpp"
 
 namespace kiss_matcher {
 
-struct PoseGraphNode {
-  pcl::PointCloud<PointType> scan_;
-  pcl::PointCloud<PointType> voxelized_scan_;  // Used for map visualization
-  Eigen::Matrix4d pose_           = Eigen::Matrix4d::Identity();
-  Eigen::Matrix4d pose_corrected_ = Eigen::Matrix4d::Identity();
-  double timestamp_;
-  size_t idx_;
-  bool nnsearch_processed_      = false;
-  bool loop_detector_processed_ = false;
+struct PoseGraphNode : public kiss_matcher_slam::Keyframe {
+  // Transitional aliases keep the ROS adapter behavior stable while the core
+  // algorithms migrate to the shared Keyframe model in later commits.
+  pcl::PointCloud<PointType> &scan_ = cloud;
+  pcl::PointCloud<PointType> &voxelized_scan_ = visualization_cloud;
+  Eigen::Matrix4d &pose_ = odometry_pose;
+  Eigen::Matrix4d &pose_corrected_ = optimized_pose;
+  double &timestamp_ = timestamp;
+  size_t &idx_ = id;
+  bool &nnsearch_processed_ = proximity_search_processed;
+  bool &loop_detector_processed_ = place_recognition_processed;
 
-  PoseGraphNode() {}
+  PoseGraphNode() = default;
+  PoseGraphNode(const PoseGraphNode &other)
+      : kiss_matcher_slam::Keyframe(other) {}
+  PoseGraphNode(PoseGraphNode &&other) noexcept
+      : kiss_matcher_slam::Keyframe(std::move(other)) {}
+  PoseGraphNode &operator=(const PoseGraphNode &other) {
+    kiss_matcher_slam::Keyframe::operator=(other);
+    return *this;
+  }
+  PoseGraphNode &operator=(PoseGraphNode &&other) noexcept {
+    kiss_matcher_slam::Keyframe::operator=(std::move(other));
+    return *this;
+  }
   inline PoseGraphNode(const nav_msgs::msg::Odometry &odom,
                        const sensor_msgs::msg::PointCloud2 &scan,
                        const size_t idx,
