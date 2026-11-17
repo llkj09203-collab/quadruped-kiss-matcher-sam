@@ -108,9 +108,6 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   scan_context_detector_ =
       std::make_unique<kiss_matcher_slam::ScanContextLoopDetector>(scan_context_config);
 
-  odom_path_.header.frame_id      = map_frame_;
-  corrected_path_.header.frame_id = map_frame_;
-
   // NOTE(hlim): To make this node compatible with being launched under different namespaces,
   // I deliberately avoided adding a '/' in front of the topic names.
   path_pub_           = this->create_publisher<nav_msgs::msg::Path>("path/original", qos);
@@ -255,14 +252,7 @@ void PoseGraphManager::writeTrajectoryProducts() {
 }
 
 void PoseGraphManager::appendKeyframePose(const PoseGraphNode &node) {
-  odoms_.points.emplace_back(node.pose_(0, 3), node.pose_(1, 3), node.pose_(2, 3));
-
-  corrected_odoms_.points.emplace_back(
-      node.pose_corrected_(0, 3), node.pose_corrected_(1, 3), node.pose_corrected_(2, 3));
-
-  odom_path_.poses.emplace_back(eigenToPoseStamped(node.pose_, map_frame_));
-  corrected_path_.poses.emplace_back(eigenToPoseStamped(node.pose_corrected_, map_frame_));
-  return;
+  visualization_state_.appendKeyframe(node.pose_, node.pose_corrected_);
 }
 
 void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg,
@@ -335,10 +325,7 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
       }
 
       ++latest_keyframe_idx;
-      {
-        std::lock_guard<std::mutex> lock(vis_mutex_);
-        appendKeyframePose(current_frame_);
-      }
+      appendKeyframePose(current_frame_);
 
       local_timer.tic();
       const auto optimization = pose_graph_backend_.optimize();
@@ -356,6 +343,8 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
         if (!map_database_.updateOptimizedPoses(pose_updates)) {
           throw std::runtime_error("pose graph result does not match the map database");
         }
+        need_map_update_ = true;
+        need_graph_vis_update_ = true;
       }
       writeTrajectoryProducts();
 
@@ -392,7 +381,8 @@ void PoseGraphManager::buildMap() {
   static size_t start_idx = 0;
 
   if (map_pub_->get_subscription_count() > 0) {
-    if (need_map_update_) {
+    const bool rebuild_map = need_map_update_.exchange(false);
+    if (rebuild_map) {
       map_cloud_->clear();
       start_idx = 0;
     }
@@ -420,9 +410,6 @@ void PoseGraphManager::buildMap() {
         toROSMsg(*voxelized_map, map_frame_, toRclcppTime(keyframes.back().timestamp)));
   }
 
-  if (need_map_update_) {
-    need_map_update_ = false;
-  }
 }
 
 void PoseGraphManager::detectLoopClosureByScanContext() {
@@ -436,7 +423,10 @@ void PoseGraphManager::detectLoopClosureByScanContext() {
 
   const auto candidate = scan_context_detector_->detect(query, stored_keyframes);
   if (candidate) {
-    loop_idx_pair_queue_.emplace(query.id, candidate->keyframe_id);
+    {
+      std::lock_guard<std::mutex> lock(lc_mutex_);
+      loop_idx_pair_queue_.emplace(query.id, candidate->keyframe_id);
+    }
     if (scan_context_verbose_) {
       RCLCPP_INFO(get_logger(),
                   "Scan Context candidate: query=%zu match=%zu distance=%.3f yaw=%.3f rad",
@@ -460,17 +450,21 @@ void PoseGraphManager::detectLoopClosureByNNSearch() {
   const auto &loop_idx_pairs = loop_closure_->fetchLoopCandidates(query, stored_keyframes);
 
   for (const auto &loop_candidate : loop_idx_pairs) {
+    std::lock_guard<std::mutex> lock(lc_mutex_);
     loop_idx_pair_queue_.push(loop_candidate);
   }
 }
 
 void PoseGraphManager::performRegistration() {
   kiss_matcher::TicToc reg_timer;
-  if (loop_idx_pair_queue_.empty()) {
-    return;
+  LoopIdxPair candidate;
+  {
+    std::lock_guard<std::mutex> lock(lc_mutex_);
+    if (loop_idx_pair_queue_.empty()) return;
+    candidate = loop_idx_pair_queue_.front();
+    loop_idx_pair_queue_.pop();
   }
-  const auto [query_idx, match_idx] = loop_idx_pair_queue_.front();
-  loop_idx_pair_queue_.pop();
+  const auto [query_idx, match_idx] = candidate;
 
   const auto stored_keyframes = map_database_.snapshot();
   if (query_idx >= stored_keyframes.size() || match_idx >= stored_keyframes.size()) {
@@ -495,10 +489,9 @@ void PoseGraphManager::performRegistration() {
     pose_graph_backend_.addLoop(
         query_idx, match_idx, pose_from.between(pose_to), loop_variances, loop_huber_k_);
 
-    vis_loop_edges_.emplace_back(query_idx, match_idx);
+    visualization_state_.addLoopEdge(query_idx, match_idx);
     succeeded_query_idx_      = query_idx;
     need_lc_cloud_vis_update_ = true;
-    need_map_update_          = true;
     need_graph_vis_update_    = true;
 
     // --------------------------------------------------
@@ -564,9 +557,14 @@ void PoseGraphManager::visualizeCurrentData(const Eigen::Matrix4d &current_odom,
 
   scan_pub_->publish(toROSMsg(
       transformPcd(current_frame_.scan_, current_frame_.pose_corrected_), map_frame_, timestamp));
-  if (!corrected_path_.poses.empty()) {
+  const auto latest_corrected_pose = visualization_state_.latestCorrectedPose();
+  if (latest_corrected_pose) {
+    geometry_msgs::msg::Point latest_position;
+    latest_position.x = (*latest_corrected_pose)(0, 3);
+    latest_position.y = (*latest_corrected_pose)(1, 3);
+    latest_position.z = (*latest_corrected_pose)(2, 3);
     loop_detection_radius_pub_->publish(
-        visualizeLoopDetectionRadius(corrected_path_.poses.back().pose.position));
+        visualizeLoopDetectionRadius(latest_position));
   }
 }
 
@@ -575,41 +573,34 @@ void PoseGraphManager::visualizePoseGraph() {
     return;
   }
 
-  if (need_graph_vis_update_) {
-    gtsam::Values corrected_esti_copied;
-    pcl::PointCloud<pcl::PointXYZ> corrected_odoms;
-    nav_msgs::msg::Path corrected_path;
-
-    corrected_esti_copied = pose_graph_backend_.estimates();
-    for (size_t i = 0; i < corrected_esti_copied.size(); ++i) {
-      gtsam::Pose3 pose_ = corrected_esti_copied.at<gtsam::Pose3>(i);
-      corrected_odoms.points.emplace_back(
-          pose_.translation().x(), pose_.translation().y(), pose_.translation().z());
-
-      corrected_path.poses.push_back(gtsamToPoseStamped(pose_, map_frame_));
+  if (need_graph_vis_update_.exchange(false)) {
+    const auto estimates = pose_graph_backend_.estimates();
+    std::vector<Eigen::Matrix4d> corrected_poses;
+    corrected_poses.reserve(estimates.size());
+    for (size_t i = 0; i < estimates.size(); ++i) {
+      corrected_poses.push_back(gtsamToEigen(estimates.at<gtsam::Pose3>(i)));
     }
-    if (!vis_loop_edges_.empty()) {
-      loop_detection_pub_->publish(visualizeLoopMarkers(corrected_esti_copied));
-    }
-    {
-      std::lock_guard<std::mutex> lock(vis_mutex_);
-      corrected_odoms_      = corrected_odoms;
-      corrected_path_.poses = corrected_path.poses;
-    }
-    need_graph_vis_update_ = false;
+    visualization_state_.updateCorrectedPoses(std::move(corrected_poses));
   }
 
-  {
-    std::lock_guard<std::mutex> lock(vis_mutex_);
-    path_pub_->publish(odom_path_);
-    corrected_path_pub_->publish(corrected_path_);
+  const auto snapshot = visualization_state_.snapshot();
+  nav_msgs::msg::Path odometry_path;
+  nav_msgs::msg::Path corrected_path;
+  odometry_path.header.frame_id = map_frame_;
+  corrected_path.header.frame_id = map_frame_;
+  for (const auto &pose : snapshot.odometry_poses) {
+    odometry_path.poses.push_back(eigenToPoseStamped(pose, map_frame_));
   }
+  for (const auto &pose : snapshot.corrected_poses) {
+    corrected_path.poses.push_back(eigenToPoseStamped(pose, map_frame_));
+  }
+  path_pub_->publish(odometry_path);
+  corrected_path_pub_->publish(corrected_path);
+  if (!snapshot.loop_edges.empty()) loop_detection_pub_->publish(visualizeLoopMarkers(snapshot));
 }
 
 void PoseGraphManager::visualizeLoopClosureClouds() {
-  if (!need_lc_cloud_vis_update_) {
-    return;
-  }
+  if (!need_lc_cloud_vis_update_.exchange(false)) return;
 
   const auto keyframes = map_database_.snapshot();
   if (succeeded_query_idx_ >= keyframes.size()) {
@@ -617,7 +608,6 @@ void PoseGraphManager::visualizeLoopClosureClouds() {
                  "Invalid successful loop-closure keyframe index: %zu (keyframe count: %zu)",
                  succeeded_query_idx_,
                  keyframes.size());
-    need_lc_cloud_vis_update_ = false;
     return;
   }
   const auto query_timestamp = toRclcppTime(keyframes[succeeded_query_idx_].timestamp);
@@ -629,11 +619,10 @@ void PoseGraphManager::visualizeLoopClosureClouds() {
   debug_coarse_aligned_pub_->publish(
       toROSMsg(loop_closure_->getCoarseAlignedCloud(), map_frame_, query_timestamp));
   debug_cloud_pub_->publish(toROSMsg(loop_closure_->getDebugCloud(), map_frame_, query_timestamp));
-  need_lc_cloud_vis_update_ = false;
 }
 
 visualization_msgs::msg::Marker PoseGraphManager::visualizeLoopMarkers(
-    const gtsam::Values &corrected_poses) const {
+    const kiss_matcher_slam::VisualizationSnapshot &snapshot) const {
   visualization_msgs::msg::Marker edges;
   edges.type               = visualization_msgs::msg::Marker::LINE_LIST;
   edges.scale.x            = 0.12f;
@@ -644,21 +633,21 @@ visualization_msgs::msg::Marker PoseGraphManager::visualizeLoopMarkers(
   edges.color.b            = 1.0f;
   edges.color.a            = 1.0f;
 
-  for (size_t i = 0; i < vis_loop_edges_.size(); ++i) {
-    if (vis_loop_edges_[i].first >= corrected_poses.size() ||
-        vis_loop_edges_[i].second >= corrected_poses.size()) {
+  for (const auto &[query_id, match_id] : snapshot.loop_edges) {
+    if (query_id >= snapshot.corrected_poses.size() ||
+        match_id >= snapshot.corrected_poses.size()) {
       continue;
     }
-    gtsam::Pose3 pose  = corrected_poses.at<gtsam::Pose3>(vis_loop_edges_[i].first);
-    gtsam::Pose3 pose2 = corrected_poses.at<gtsam::Pose3>(vis_loop_edges_[i].second);
+    const auto &pose = snapshot.corrected_poses[query_id];
+    const auto &pose2 = snapshot.corrected_poses[match_id];
 
     geometry_msgs::msg::Point p, p2;
-    p.x  = pose.translation().x();
-    p.y  = pose.translation().y();
-    p.z  = pose.translation().z();
-    p2.x = pose2.translation().x();
-    p2.y = pose2.translation().y();
-    p2.z = pose2.translation().z();
+    p.x  = pose(0, 3);
+    p.y  = pose(1, 3);
+    p.z  = pose(2, 3);
+    p2.x = pose2(0, 3);
+    p2.y = pose2(1, 3);
+    p2.z = pose2(2, 3);
 
     edges.points.push_back(p);
     edges.points.push_back(p2);

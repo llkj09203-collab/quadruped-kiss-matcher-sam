@@ -3,6 +3,7 @@
 #ifndef KISS_MATCHER_POSE_GRAPH_MANAGER_H
 #define KISS_MATCHER_POSE_GRAPH_MANAGER_H
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -54,6 +55,7 @@
 #include "kiss_matcher_slam/core/pose_graph_backend.hpp"
 #include "kiss_matcher_slam/core/realtime_pose_tracker.hpp"
 #include "kiss_matcher_slam/core/scan_context_loop_detector.hpp"
+#include "kiss_matcher_slam/core/visualization_state.hpp"
 #include "slam/loop_closure.h"
 #include "slam/pose_graph_node.hpp"
 #include "slam/utils.hpp"
@@ -91,7 +93,8 @@ class PoseGraphManager : public rclcpp::Node {
 
   void visualizeLoopClosureClouds();
 
-  visualization_msgs::msg::Marker visualizeLoopMarkers(const gtsam::Values &corrected_poses) const;
+  visualization_msgs::msg::Marker visualizeLoopMarkers(
+      const kiss_matcher_slam::VisualizationSnapshot &snapshot) const;
   visualization_msgs::msg::Marker visualizeLoopDetectionRadius(
       const geometry_msgs::msg::Point &latest_position) const;
 
@@ -106,18 +109,18 @@ class PoseGraphManager : public rclcpp::Node {
   std::string output_directory_;
 
   std::mutex lc_mutex_;
-  std::mutex vis_mutex_;
   std::mutex gps_mutex_;
 
   kiss_matcher::PoseGraphNode current_frame_;
   kiss_matcher_slam::MapDatabase map_database_;
   std::unique_ptr<kiss_matcher_slam::MapProductWriter> map_product_writer_;
   kiss_matcher_slam::RealtimePoseTracker realtime_pose_tracker_;
+  kiss_matcher_slam::VisualizationState visualization_state_;
 
-  bool is_initialized_           = false;
-  bool need_map_update_          = false;
-  bool need_graph_vis_update_    = false;
-  bool need_lc_cloud_vis_update_ = false;
+  std::atomic<bool> is_initialized_{false};
+  std::atomic<bool> need_map_update_{false};
+  std::atomic<bool> need_graph_vis_update_{false};
+  std::atomic<bool> need_lc_cloud_vis_update_{false};
 
   kiss_matcher_slam::PoseGraphBackend pose_graph_backend_;
 
@@ -145,16 +148,12 @@ class PoseGraphManager : public rclcpp::Node {
   sensor_msgs::msg::NavSatFix::ConstSharedPtr latest_gps_;
 
   size_t succeeded_query_idx_ = 0;
-  std::vector<std::pair<size_t, size_t>> vis_loop_edges_;
   // pose_graph_tools_msgs::msg::PoseGraph loop_msgs_;
   std::queue<LoopIdxPair> loop_idx_pair_queue_;
 
   kiss_matcher::TicToc timer_;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-
-  pcl::PointCloud<pcl::PointXYZ> odoms_, corrected_odoms_;
-  nav_msgs::msg::Path odom_path_, corrected_path_;
 
   bool store_voxelized_scan_ = false;
 

@@ -79,6 +79,7 @@ add_library(kiss_matcher_slam_core
   src/core/pose_graph_backend.cpp
   src/core/realtime_pose_tracker.cpp
   src/core/scan_context_loop_detector.cpp
+  src/core/visualization_state.cpp
 )
 target_include_directories(kiss_matcher_slam_core PUBLIC include ${PCL_INCLUDE_DIRS})
 target_link_libraries(kiss_matcher_slam_core ${PCL_LIBRARIES} gtsam)
@@ -183,6 +184,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_scan_context_loop_detector test/test_scan_context_loop_detector.cpp)
   target_include_directories(test_scan_context_loop_detector PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_scan_context_loop_detector kiss_matcher_slam_core ${PCL_LIBRARIES})
+
+  ament_add_gtest(test_visualization_state test/test_visualization_state.cpp)
+  target_include_directories(test_visualization_state PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_visualization_state kiss_matcher_slam_core)
 
   ament_add_gtest(test_loop_closure test/test_loop_closure.cpp src/slam/loop_closure.cpp)
   target_include_directories(test_loop_closure PRIVATE include ${PCL_INCLUDE_DIRS})
