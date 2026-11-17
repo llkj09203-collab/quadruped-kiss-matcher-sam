@@ -146,4 +146,8 @@ install(DIRECTORY launch config rviz docs
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS scripts/validate_map_product.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
