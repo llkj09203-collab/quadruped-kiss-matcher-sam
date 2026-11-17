@@ -31,9 +31,14 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   scan_voxel_res_                  = lc_config.voxel_res_;
   map_voxel_res_                   = declare_parameter<double>("map_voxel_resolution", 1.0);
   save_voxel_res_                  = declare_parameter<double>("save_voxel_resolution", 0.3);
-  keyframe_thr_                    = declare_parameter<double>("keyframe.keyframe_threshold", 1.0);
-  keyframe_rotation_thr_rad_ =
+  kiss_matcher_slam::KeyframeSelectorConfig keyframe_config;
+  keyframe_config.translation_threshold_m =
+      declare_parameter<double>("keyframe.keyframe_threshold", 1.0);
+  keyframe_config.rotation_threshold_rad =
       declare_parameter<double>("keyframe.rotation_threshold_deg", 10.0) * M_PI / 180.0;
+  keyframe_config.minimum_time_interval_s =
+      declare_parameter<double>("keyframe.minimum_time_interval", 0.0);
+  keyframe_selector_ = kiss_matcher_slam::KeyframeSelector(keyframe_config);
   lc_config.num_submap_keyframes_  = declare_parameter<int>("keyframe.num_submap_keyframes", 5);
   lc_config.verbose_               = declare_parameter<bool>("loop.verbose", false);
   lc_config.is_multilayer_env_     = declare_parameter<bool>("loop.is_multilayer_env", false);
@@ -160,9 +165,10 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
              << "base_frame: " << base_frame_ << "\n"
              << "pointcloud_frame: lidar\n"
              << "trajectory_format: tum\n"
-             << "keyframe_translation_threshold_m: " << keyframe_thr_ << "\n"
+             << "keyframe_translation_threshold_m: "
+             << keyframe_selector_.config().translation_threshold_m << "\n"
              << "keyframe_rotation_threshold_deg: "
-             << keyframe_rotation_thr_rad_ * 180.0 / M_PI << "\n"
+             << keyframe_selector_.config().rotation_threshold_rad * 180.0 / M_PI << "\n"
              << "gps_altitude_enabled: " << (use_gps_altitude_ ? "true" : "false") << "\n";
   }
 
@@ -332,7 +338,10 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
 
   } else {
     const auto t_keyframe_processing = local_timer.toc();
-    if (checkIfKeyframe(current_frame_, keyframes_.back())) {
+    if (keyframe_selector_.shouldCreate(current_frame_.pose_corrected_,
+                                        current_frame_.timestamp_,
+                                        keyframes_.back().pose_corrected_,
+                                        keyframes_.back().timestamp_)) {
       {
         std::lock_guard<std::mutex> lock(keyframes_mutex_);
         keyframes_.push_back(current_frame_);
@@ -753,18 +762,6 @@ visualization_msgs::msg::Marker PoseGraphManager::visualizeLoopDetectionRadius(
   sphere.color.a = 0.5;
 
   return sphere;
-}
-
-bool PoseGraphManager::checkIfKeyframe(const PoseGraphNode &query_node,
-                                       const PoseGraphNode &latest_node) {
-  const double translation = (latest_node.pose_corrected_.block<3, 1>(0, 3) -
-                              query_node.pose_corrected_.block<3, 1>(0, 3))
-                                 .norm();
-  const Eigen::Matrix3d relative_rotation =
-      latest_node.pose_corrected_.block<3, 3>(0, 0).transpose() *
-      query_node.pose_corrected_.block<3, 3>(0, 0);
-  const double rotation = Eigen::AngleAxisd(relative_rotation).angle();
-  return translation > keyframe_thr_ || rotation > keyframe_rotation_thr_rad_;
 }
 
 void PoseGraphManager::saveFlagCallback(const std_msgs::msg::String::ConstSharedPtr &msg) {

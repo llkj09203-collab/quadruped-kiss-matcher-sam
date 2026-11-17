@@ -36,6 +36,9 @@ endif()
 
 # Load small_gicp
 include(FetchContent)
+# small_gicp uses the generic BUILD_TESTS cache key. Force its data-dependent
+# upstream tests off; this package owns its tests through BUILD_TESTING below.
+set(BUILD_TESTS OFF CACHE BOOL "Disable dependency tests" FORCE)
 FetchContent_Declare(
   small_gicp
   GIT_REPOSITORY https://github.com/koide3/small_gicp
@@ -68,6 +71,12 @@ link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
 find_package(GTSAM REQUIRED)
+
+add_library(kiss_matcher_slam_core
+  src/core/keyframe_selector.cpp
+)
+target_include_directories(kiss_matcher_slam_core PUBLIC include ${PCL_INCLUDE_DIRS})
+target_link_libraries(kiss_matcher_slam_core ${PCL_LIBRARIES})
 
 ################################################################################
 add_executable(run_kiss_matcher src/run_kiss_matcher.cpp)
@@ -108,6 +117,7 @@ ament_target_dependencies(kiss_matcher_sam
 )
 
 target_link_libraries(kiss_matcher_sam
+  kiss_matcher_slam_core
   kiss_matcher::kiss_matcher_core
   ${PCL_LIBRARIES}
   small_gicp
@@ -134,13 +144,22 @@ target_link_libraries(inter_frame_alignment
 )
 
 install(TARGETS
+  kiss_matcher_slam_core
   registration_visualizer
   run_kiss_matcher
   kiss_matcher_sam
   inter_frame_alignment
   LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_keyframe_selector test/test_keyframe_selector.cpp)
+  target_include_directories(test_keyframe_selector PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_keyframe_selector kiss_matcher_slam_core ${PCL_LIBRARIES})
+endif()
 
 install(DIRECTORY launch config rviz docs
   DESTINATION share/${PROJECT_NAME}

@@ -20,6 +20,7 @@
     keyframe:
       keyframe_threshold: 1.5        # ⭐ [Unit: m] Distance threshold to add a new keyframe
       rotation_threshold_deg: 10.0  # Add a keyframe after this much in-place rotation
+      minimum_time_interval: 0.0    # Optional guard against high-frequency keyframes
       # NOTE(hlim): Once `num_submap_keyframes` is larger than 1,
       # Submap-to-submap registration is performed.
       # The main advantage of KISS-Matcher is its super-fast speed in submap matching!

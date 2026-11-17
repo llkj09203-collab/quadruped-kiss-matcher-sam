@@ -57,6 +57,7 @@
 #include <gtsam/slam/PriorFactor.h>
 
 #include "../tictoc.hpp"
+#include "kiss_matcher_slam/core/keyframe_selector.hpp"
 #include "slam/loop_closure.h"
 #include "slam/loop_detector.h"
 #include "slam/pose_graph_node.hpp"
@@ -100,9 +101,6 @@ class PoseGraphManager : public rclcpp::Node {
   visualization_msgs::msg::Marker visualizeLoopDetectionRadius(
       const geometry_msgs::msg::Point &latest_position) const;
 
-  bool checkIfKeyframe(const kiss_matcher::PoseGraphNode &query_node,
-                       const kiss_matcher::PoseGraphNode &latest_node);
-
   void saveFlagCallback(const std_msgs::msg::String::ConstSharedPtr &msg);
   void gpsCallback(const sensor_msgs::msg::NavSatFix::ConstSharedPtr msg);
   void saveKeyframeIncrementally(const kiss_matcher::PoseGraphNode &node);
@@ -139,8 +137,7 @@ class PoseGraphManager : public rclcpp::Node {
   gtsam::Values init_esti_;
   gtsam::Values corrected_esti_;
 
-  double keyframe_thr_;
-  double keyframe_rotation_thr_rad_;
+  kiss_matcher_slam::KeyframeSelector keyframe_selector_;
   double scan_voxel_res_;
   double map_voxel_res_;
   double save_voxel_res_;
