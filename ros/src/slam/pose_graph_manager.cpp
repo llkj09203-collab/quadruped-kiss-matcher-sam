@@ -175,7 +175,12 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   //   std::chrono::duration<double>(1.0 / loop_pub_hz),
   //   std::bind(&PoseGraphManager::loopPubTimerFunc, this));
 
-  map_cloud_.reset(new pcl::PointCloud<PointType>());
+  kiss_matcher_slam::IncrementalMapBuilderConfig map_builder_config;
+  map_builder_config.scan_voxel_resolution = scan_voxel_res_;
+  map_builder_config.map_voxel_resolution = map_voxel_res_;
+  map_builder_config.keyframe_clouds_are_voxelized = store_voxelized_scan_;
+  map_builder_ =
+      std::make_unique<kiss_matcher_slam::IncrementalMapBuilder>(map_builder_config);
   map_timer_ = this->create_wall_timer(std::chrono::duration<double>(1.0 / map_update_hz),
                                        std::bind(&PoseGraphManager::buildMap, this));
 
@@ -370,38 +375,19 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
 // }
 
 void PoseGraphManager::buildMap() {
-  static size_t start_idx = 0;
-
   if (map_pub_->get_subscription_count() > 0) {
     const bool rebuild_map = need_map_update_.exchange(false);
-    if (rebuild_map) {
-      map_cloud_->clear();
-      start_idx = 0;
-    }
-
     auto keyframes = map_database_.snapshot();
     if (keyframes.empty()) return;
-
-    // NOTE(hlim): Building the full map causes RViz delay when keyframes > 500.
-    // Since the map is for visualization only, we apply a heuristic to reduce cost.
-    for (size_t i = start_idx; i < keyframes.size(); ++i) {
-      if (!store_voxelized_scan_ && keyframes[i].visualization_cloud.empty()) {
-        keyframes[i].visualization_cloud = *voxelize(keyframes[i].cloud, scan_voxel_res_);
-        if (!map_database_.setVisualizationCloud(i, keyframes[i].visualization_cloud)) {
-          throw std::runtime_error("failed to cache a keyframe visualization cloud");
-        }
+    auto map_result = map_builder_->build(keyframes, rebuild_map);
+    for (auto &[id, cloud] : map_result.visualization_cache_updates) {
+      if (!map_database_.setVisualizationCloud(id, std::move(cloud))) {
+        throw std::runtime_error("failed to cache a keyframe visualization cloud");
       }
-      const auto &scan = store_voxelized_scan_ ? keyframes[i].cloud
-                                                : keyframes[i].visualization_cloud;
-      *map_cloud_ += transformPcd(scan, keyframes[i].optimized_pose);
     }
-    start_idx = keyframes.size();
-
-    const auto &voxelized_map = voxelize(map_cloud_, map_voxel_res_);
     map_pub_->publish(
-        toROSMsg(*voxelized_map, map_frame_, toRclcppTime(keyframes.back().timestamp)));
+        toROSMsg(map_result.cloud, map_frame_, toRclcppTime(keyframes.back().timestamp)));
   }
-
 }
 
 void PoseGraphManager::detectLoopClosureByScanContext() {

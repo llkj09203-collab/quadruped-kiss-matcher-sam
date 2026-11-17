@@ -50,6 +50,7 @@
 
 #include "../tictoc.hpp"
 #include "kiss_matcher_slam/core/gps_altitude_manager.hpp"
+#include "kiss_matcher_slam/core/incremental_map_builder.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
 #include "kiss_matcher_slam/core/map_database.hpp"
 #include "kiss_matcher_slam/core/map_product_writer.hpp"
@@ -117,6 +118,7 @@ class PoseGraphManager : public rclcpp::Node {
   kiss_matcher_slam::RealtimePoseTracker realtime_pose_tracker_;
   kiss_matcher_slam::VisualizationState visualization_state_;
   std::unique_ptr<kiss_matcher_slam::GpsAltitudeManager> gps_altitude_manager_;
+  std::unique_ptr<kiss_matcher_slam::IncrementalMapBuilder> map_builder_;
 
   std::atomic<bool> is_initialized_{false};
   std::atomic<bool> need_map_update_{false};
@@ -163,8 +165,6 @@ class PoseGraphManager : public rclcpp::Node {
   bool scan_context_enabled_ = true;
   bool scan_context_verbose_ = false;
   std::unique_ptr<kiss_matcher_slam::ScanContextLoopDetector> scan_context_detector_;
-
-  pcl::PointCloud<PointType>::Ptr map_cloud_;
 
   // ROS2 interface
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr corrected_path_pub_;

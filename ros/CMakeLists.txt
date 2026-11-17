@@ -74,6 +74,7 @@ find_package(GTSAM REQUIRED)
 
 add_library(kiss_matcher_slam_core
   src/core/gps_altitude_manager.cpp
+  src/core/incremental_map_builder.cpp
   src/core/keyframe_selector.cpp
   src/core/map_database.cpp
   src/core/map_product_writer.cpp
@@ -165,6 +166,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_gps_altitude_manager test/test_gps_altitude_manager.cpp)
   target_include_directories(test_gps_altitude_manager PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_gps_altitude_manager kiss_matcher_slam_core)
+
+  ament_add_gtest(test_incremental_map_builder test/test_incremental_map_builder.cpp)
+  target_include_directories(test_incremental_map_builder PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_incremental_map_builder kiss_matcher_slam_core ${PCL_LIBRARIES})
 
   ament_add_gtest(test_keyframe_selector test/test_keyframe_selector.cpp)
   target_include_directories(test_keyframe_selector PRIVATE include ${PCL_INCLUDE_DIRS})
