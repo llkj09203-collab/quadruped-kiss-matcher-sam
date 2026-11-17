@@ -126,6 +126,12 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
 
   loop_closure_          = std::make_shared<LoopClosure>(lc_config, this->get_logger());
   loop_detection_radius_ = lc_config.loop_detection_radius_;
+  loop_registration_coordinator_ =
+      std::make_unique<kiss_matcher_slam::LoopRegistrationCoordinator>(
+          loop_candidate_queue_,
+          map_database_,
+          *loop_closure_,
+          *loop_constraint_processor_);
 
   scan_context_detector_ =
       std::make_unique<kiss_matcher_slam::ScanContextLoopDetector>(scan_context_config);
@@ -393,54 +399,21 @@ void PoseGraphManager::detectLoopClosureByNNSearch() {
 }
 
 void PoseGraphManager::performRegistration() {
-  kiss_matcher::TicToc reg_timer;
-  const auto queued_candidate = loop_candidate_queue_.tryPop();
-  if (!queued_candidate) return;
-  const auto candidate = *queued_candidate;
-  const auto [query_idx, match_idx] = candidate;
-
-  const auto stored_keyframes = map_database_.snapshot();
-  if (query_idx >= stored_keyframes.size() || match_idx >= stored_keyframes.size()) {
+  const auto outcome = loop_registration_coordinator_->processNext();
+  using Status = kiss_matcher_slam::LoopRegistrationStatus;
+  if (outcome.status == Status::kNoWork) return;
+  if (outcome.status == Status::kInvalidCandidate) {
     RCLCPP_ERROR(get_logger(), "Discarding loop candidate with an invalid keyframe index");
     return;
   }
-  const RegOutput &reg_output =
-      loop_closure_->performLoopClosure(stored_keyframes, query_idx, match_idx);
-
-  if (reg_output.is_valid_) {
-    RCLCPP_INFO(this->get_logger(), "LC accepted. Overlapness: %.3f", reg_output.overlapness_);
-    loop_constraint_processor_->apply(
-        {query_idx, match_idx, reg_output.pose_, reg_output.overlapness_}, stored_keyframes);
-    succeeded_query_idx_      = query_idx;
-    need_lc_cloud_vis_update_ = true;
-
-    // --------------------------------------------------
-    // TODO(hlim): resurrect pose_graph_tools_msgs
-    // pose_graph_tools_msgs::msg::PoseGraphEdge edge;
-    // double lidar_end_time_compensation = 0.1;
-    // edge.header.stamp = this->now();
-    // edge.robot_from = 0;
-    // edge.robot_to = 0;
-    // edge.type = 1;
-
-    // edge.key_to = static_cast<uint64_t>(
-    //   (keyframes_.back().timestamp_ - lidar_end_time_compensation) * 1e9);
-    // edge.key_from = static_cast<uint64_t>(
-    //   (keyframes_[closest_keyframe_idx].timestamp_ - lidar_end_time_compensation) * 1e9);
-
-    // Eigen::Matrix4d pose_inv = pose_to.matrix().inverse() * pose_from.matrix();
-    // edge.pose = poseEigToPoseGeo(pose_inv);
-    // loop_msgs_.edges.emplace_back(edge);
-    // last_lc_time_ = this->now().seconds();
-    // --------------------------------------------------
-  } else {
-    if (reg_output.overlapness_ == 0.0) {
-      RCLCPP_WARN(this->get_logger(), "LC rejected. KISS-Matcher failed");
-    } else {
-      RCLCPP_WARN(this->get_logger(), "LC rejected. Overlapness: %.3f", reg_output.overlapness_);
-    }
+  if (outcome.status == Status::kAccepted) {
+    RCLCPP_INFO(this->get_logger(), "LC accepted. Overlapness: %.3f", outcome.overlap_percent);
+  } else if (outcome.status == Status::kRejectedMatcher) {
+    RCLCPP_WARN(this->get_logger(), "LC rejected. KISS-Matcher failed");
+  } else if (outcome.status == Status::kRejectedOverlap) {
+    RCLCPP_WARN(this->get_logger(), "LC rejected. Overlapness: %.3f", outcome.overlap_percent);
   }
-  RCLCPP_INFO(this->get_logger(), "Reg: %.1f msec", reg_timer.toc());
+  RCLCPP_INFO(this->get_logger(), "Reg: %.1f msec", outcome.elapsed_ms);
 }
 
 void PoseGraphManager::visualizeCurrentData(const Eigen::Matrix4d &current_odom,
@@ -520,25 +493,25 @@ void PoseGraphManager::visualizePoseGraph() {
 }
 
 void PoseGraphManager::visualizeLoopClosureClouds() {
-  if (!need_lc_cloud_vis_update_.exchange(false)) return;
-
+  const auto debug = loop_registration_coordinator_->consumeDebugClouds();
+  if (!debug) return;
   const auto keyframes = map_database_.snapshot();
-  if (succeeded_query_idx_ >= keyframes.size()) {
+  if (debug->query_id >= keyframes.size()) {
     RCLCPP_ERROR(this->get_logger(),
                  "Invalid successful loop-closure keyframe index: %zu (keyframe count: %zu)",
-                 succeeded_query_idx_,
+                 debug->query_id,
                  keyframes.size());
     return;
   }
-  const auto query_timestamp = toRclcppTime(keyframes[succeeded_query_idx_].timestamp);
+  const auto query_timestamp = toRclcppTime(keyframes[debug->query_id].timestamp);
 
-  debug_src_pub_->publish(toROSMsg(loop_closure_->getSourceCloud(), map_frame_, query_timestamp));
-  debug_tgt_pub_->publish(toROSMsg(loop_closure_->getTargetCloud(), map_frame_, query_timestamp));
+  debug_src_pub_->publish(toROSMsg(debug->source, map_frame_, query_timestamp));
+  debug_tgt_pub_->publish(toROSMsg(debug->target, map_frame_, query_timestamp));
   debug_fine_aligned_pub_->publish(
-      toROSMsg(loop_closure_->getFinalAlignedCloud(), map_frame_, query_timestamp));
+      toROSMsg(debug->final_aligned, map_frame_, query_timestamp));
   debug_coarse_aligned_pub_->publish(
-      toROSMsg(loop_closure_->getCoarseAlignedCloud(), map_frame_, query_timestamp));
-  debug_cloud_pub_->publish(toROSMsg(loop_closure_->getDebugCloud(), map_frame_, query_timestamp));
+      toROSMsg(debug->coarse_aligned, map_frame_, query_timestamp));
+  debug_cloud_pub_->publish(toROSMsg(debug->debug, map_frame_, query_timestamp));
 }
 
 visualization_msgs::msg::Marker PoseGraphManager::visualizeLoopMarkers(

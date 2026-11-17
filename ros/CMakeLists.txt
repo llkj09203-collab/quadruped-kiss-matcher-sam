@@ -116,7 +116,8 @@ target_link_libraries(registration_visualizer
 )
 
 add_executable(kiss_matcher_sam src/slam/pose_graph_manager.cpp
-                                src/slam/loop_closure.cpp)
+                                src/slam/loop_closure.cpp
+                                src/slam/loop_registration_coordinator.cpp)
 ament_target_dependencies(kiss_matcher_sam
   rclcpp
   tf2_ros
@@ -226,6 +227,18 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_loop_closure
     kiss_matcher::kiss_matcher_core ${PCL_LIBRARIES} small_gicp gtsam
+  )
+
+  ament_add_gtest(test_loop_registration_coordinator
+    test/test_loop_registration_coordinator.cpp
+    src/slam/loop_closure.cpp
+    src/slam/loop_registration_coordinator.cpp)
+  target_include_directories(test_loop_registration_coordinator PRIVATE include ${PCL_INCLUDE_DIRS})
+  ament_target_dependencies(test_loop_registration_coordinator
+    rclcpp geometry_msgs sensor_msgs nav_msgs pcl_conversions tf2_ros tf2_eigen tf2_geometry_msgs
+  )
+  target_link_libraries(test_loop_registration_coordinator
+    kiss_matcher_slam_core kiss_matcher::kiss_matcher_core ${PCL_LIBRARIES} small_gicp gtsam
   )
 endif()
 

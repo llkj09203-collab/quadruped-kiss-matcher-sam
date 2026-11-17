@@ -61,6 +61,7 @@
 #include "kiss_matcher_slam/core/scan_context_loop_detector.hpp"
 #include "kiss_matcher_slam/core/visualization_state.hpp"
 #include "slam/loop_closure.h"
+#include "slam/loop_registration_coordinator.hpp"
 #include "slam/pose_graph_node.hpp"
 #include "slam/utils.hpp"
 
@@ -120,10 +121,10 @@ class PoseGraphManager : public rclcpp::Node {
   kiss_matcher_slam::RealtimePoseTracker realtime_pose_tracker_;
   kiss_matcher_slam::VisualizationState visualization_state_;
   std::unique_ptr<kiss_matcher_slam::LoopConstraintProcessor> loop_constraint_processor_;
+  std::unique_ptr<kiss_matcher_slam::LoopRegistrationCoordinator>
+      loop_registration_coordinator_;
   std::unique_ptr<kiss_matcher_slam::GpsAltitudeManager> gps_altitude_manager_;
   std::unique_ptr<kiss_matcher_slam::IncrementalMapBuilder> map_builder_;
-
-  std::atomic<bool> need_lc_cloud_vis_update_{false};
 
   kiss_matcher_slam::PoseGraphBackend pose_graph_backend_;
 
@@ -134,7 +135,6 @@ class PoseGraphManager : public rclcpp::Node {
   double loop_detection_radius_;  // Only for visualization
   int sub_key_num_;
 
-  size_t succeeded_query_idx_ = 0;
   // pose_graph_tools_msgs::msg::PoseGraph loop_msgs_;
   kiss_matcher_slam::LoopCandidateQueue loop_candidate_queue_;
 
