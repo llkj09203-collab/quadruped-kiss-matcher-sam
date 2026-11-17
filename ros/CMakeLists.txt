@@ -168,6 +168,15 @@ if(BUILD_TESTING)
   ament_add_gtest(test_scan_context_loop_detector test/test_scan_context_loop_detector.cpp)
   target_include_directories(test_scan_context_loop_detector PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_scan_context_loop_detector kiss_matcher_slam_core ${PCL_LIBRARIES})
+
+  ament_add_gtest(test_loop_closure test/test_loop_closure.cpp src/slam/loop_closure.cpp)
+  target_include_directories(test_loop_closure PRIVATE include ${PCL_INCLUDE_DIRS})
+  ament_target_dependencies(test_loop_closure
+    rclcpp geometry_msgs sensor_msgs nav_msgs pcl_conversions tf2_ros tf2_eigen tf2_geometry_msgs
+  )
+  target_link_libraries(test_loop_closure
+    kiss_matcher::kiss_matcher_core ${PCL_LIBRARIES} small_gicp gtsam
+  )
 endif()
 
 install(DIRECTORY launch config rviz docs

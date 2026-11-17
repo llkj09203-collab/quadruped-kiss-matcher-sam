@@ -14,7 +14,6 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   LoopClosureConfig lc_config;
   kiss_matcher_slam::ScanContextConfig scan_context_config;
   auto &gc = lc_config.gicp_config_;
-  auto &mc = lc_config.matcher_config_;
 
   map_frame_             = declare_parameter<std::string>("map_frame", "map");
   base_frame_            = declare_parameter<std::string>("base_frame", "base");
@@ -28,6 +27,7 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
 
   store_voxelized_scan_            = declare_parameter<bool>("store_voxelized_scan", false);
   lc_config.voxel_res_             = declare_parameter<double>("voxel_resolution", 0.3);
+  lc_config.matcher_config_ = KISSMatcherConfig(lc_config.voxel_res_, false);
   scan_voxel_res_                  = lc_config.voxel_res_;
   map_voxel_res_                   = declare_parameter<double>("map_voxel_resolution", 1.0);
   save_voxel_res_                  = declare_parameter<double>("save_voxel_resolution", 0.3);
@@ -519,12 +519,9 @@ void PoseGraphManager::detectLoopClosureByNNSearch() {
 
   auto stored_keyframes = map_database_.snapshot();
   stored_keyframes.resize(*claimed_id + 1);
-  std::vector<PoseGraphNode> keyframes;
-  keyframes.reserve(stored_keyframes.size());
-  for (const auto &keyframe : stored_keyframes) keyframes.emplace_back(keyframe);
-  const auto &query = keyframes.back();
+  const auto &query = stored_keyframes.back();
 
-  const auto &loop_idx_pairs = loop_closure_->fetchLoopCandidates(query, keyframes);
+  const auto &loop_idx_pairs = loop_closure_->fetchLoopCandidates(query, stored_keyframes);
 
   for (const auto &loop_candidate : loop_idx_pairs) {
     loop_idx_pair_queue_.push(loop_candidate);
@@ -544,15 +541,14 @@ void PoseGraphManager::performRegistration() {
     RCLCPP_ERROR(get_logger(), "Discarding loop candidate with an invalid keyframe index");
     return;
   }
-  std::vector<PoseGraphNode> keyframes;
-  keyframes.reserve(stored_keyframes.size());
-  for (const auto &keyframe : stored_keyframes) keyframes.emplace_back(keyframe);
-  const RegOutput &reg_output = loop_closure_->performLoopClosure(keyframes, query_idx, match_idx);
+  const RegOutput &reg_output =
+      loop_closure_->performLoopClosure(stored_keyframes, query_idx, match_idx);
 
   if (reg_output.is_valid_) {
     RCLCPP_INFO(this->get_logger(), "LC accepted. Overlapness: %.3f", reg_output.overlapness_);
-    gtsam::Pose3 pose_from = eigenToGtsam(reg_output.pose_ * keyframes[query_idx].pose_corrected_);
-    gtsam::Pose3 pose_to   = eigenToGtsam(keyframes[match_idx].pose_corrected_);
+    gtsam::Pose3 pose_from =
+        eigenToGtsam(reg_output.pose_ * stored_keyframes[query_idx].optimized_pose);
+    gtsam::Pose3 pose_to = eigenToGtsam(stored_keyframes[match_idx].optimized_pose);
 
     std::vector<double> loop_variances = loop_variances_;
     if (adaptive_loop_noise_) {

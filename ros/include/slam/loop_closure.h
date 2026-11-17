@@ -19,8 +19,8 @@
 #include <small_gicp/pcl/pcl_registration.hpp>
 
 #include "rclcpp/rclcpp.hpp"
+#include "kiss_matcher_slam/core/keyframe.hpp"
 #include "slam/loop_types.hpp"
-#include "slam/pose_graph_node.hpp"
 #include "slam/utils.hpp"
 
 using NodePair = std::tuple<pcl::PointCloud<PointType>, pcl::PointCloud<PointType>>;
@@ -43,10 +43,10 @@ struct LoopClosureConfig {
   size_t num_submap_keyframes_     = 11;
   size_t num_inliers_threshold_    = 100;
   double voxel_res_                = 0.1;
-  double loop_detection_radius_;
-  double loop_detection_timediff_threshold_;
+  double loop_detection_radius_ = 15.0;
+  double loop_detection_timediff_threshold_ = 10.0;
   GICPConfig gicp_config_;
-  KISSMatcherConfig matcher_config_;
+  KISSMatcherConfig matcher_config_ = KISSMatcherConfig(0.1f, false);
 };
 
 // Registration Output
@@ -79,22 +79,24 @@ class LoopClosure {
  public:
   explicit LoopClosure(const LoopClosureConfig &config, const rclcpp::Logger &logger);
   ~LoopClosure();
-  double calculateDistance(const Eigen::Matrix4d &pose1, const Eigen::Matrix4d &pose2);
+  double calculateDistance(const Eigen::Matrix4d &pose1, const Eigen::Matrix4d &pose2) const;
 
-  LoopCandidates getLoopCandidatesFromQuery(const PoseGraphNode &query_frame,
-                                            const std::vector<PoseGraphNode> &keyframes);
+  LoopCandidates getLoopCandidatesFromQuery(
+      const kiss_matcher_slam::Keyframe &query_frame,
+      const std::vector<kiss_matcher_slam::Keyframe> &keyframes) const;
 
-  LoopCandidate getClosestCandidate(const LoopCandidates &candidates);
+  LoopCandidate getClosestCandidate(const LoopCandidates &candidates) const;
 
-  LoopIdxPairs fetchClosestLoopCandidate(const PoseGraphNode &query_frame,
-                                         const std::vector<PoseGraphNode> &keyframes);
+  LoopIdxPairs fetchClosestLoopCandidate(
+      const kiss_matcher_slam::Keyframe &query_frame,
+      const std::vector<kiss_matcher_slam::Keyframe> &keyframes) const;
 
-  LoopIdxPairs fetchLoopCandidates(const PoseGraphNode &query_frame,
-                                   const std::vector<PoseGraphNode> &keyframes,
+  LoopIdxPairs fetchLoopCandidates(const kiss_matcher_slam::Keyframe &query_frame,
+                                   const std::vector<kiss_matcher_slam::Keyframe> &keyframes,
                                    const size_t num_max_candidates  = 3,
                                    const double reliable_window_sec = 30);
 
-  NodePair setSrcAndTgtCloud(const std::vector<PoseGraphNode> &keyframes,
+  NodePair setSrcAndTgtCloud(const std::vector<kiss_matcher_slam::Keyframe> &keyframes,
                              const size_t src_idx,
                              const size_t tgt_idx,
                              const size_t num_submap_keyframes,
@@ -110,10 +112,10 @@ class LoopClosure {
   RegOutput coarseToFineAlignment(const pcl::PointCloud<PointType> &src,
                                   const pcl::PointCloud<PointType> &tgt);
 
-  RegOutput performLoopClosure(const PoseGraphNode &query_keyframe,
-                               const std::vector<PoseGraphNode> &keyframes);
+  RegOutput performLoopClosure(const kiss_matcher_slam::Keyframe &query_keyframe,
+                               const std::vector<kiss_matcher_slam::Keyframe> &keyframes);
 
-  RegOutput performLoopClosure(const std::vector<PoseGraphNode> &keyframes,
+  RegOutput performLoopClosure(const std::vector<kiss_matcher_slam::Keyframe> &keyframes,
                                const size_t query_idx,
                                const size_t match_idx);
 

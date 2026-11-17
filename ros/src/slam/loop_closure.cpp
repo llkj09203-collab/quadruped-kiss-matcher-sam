@@ -1,13 +1,28 @@
 #include "slam/loop_closure.h"
 
+#include <cmath>
+#include <stdexcept>
+
 using namespace kiss_matcher;
 
 LoopClosure::LoopClosure(const LoopClosureConfig &config, const rclcpp::Logger &logger)
     : config_(config), logger_(logger) {
-  config_.matcher_config_ = kiss_matcher::KISSMatcherConfig(config_.voxel_res_, false);
+  const auto &gc = config_.gicp_config_;
+  if (!std::isfinite(config_.voxel_res_) || config_.voxel_res_ <= 0.0 ||
+      config_.num_submap_keyframes_ == 0 || gc.num_threads_ <= 0 ||
+      gc.correspondence_randomness_ <= 0 || gc.max_num_iter_ <= 0 ||
+      !std::isfinite(gc.scale_factor_for_corr_dist_) || gc.scale_factor_for_corr_dist_ <= 0.0 ||
+      !std::isfinite(gc.overlap_threshold_) || gc.overlap_threshold_ < 0.0 ||
+      gc.overlap_threshold_ > 100.0 || !std::isfinite(config_.loop_detection_radius_) ||
+      config_.loop_detection_radius_ <= 0.0 ||
+      !std::isfinite(config_.loop_detection_timediff_threshold_) ||
+      config_.loop_detection_timediff_threshold_ < 0.0 ||
+      std::abs(config_.matcher_config_.voxel_size_ - config_.voxel_res_) > 1e-6) {
+    throw std::invalid_argument("invalid loop-closure configuration");
+  }
 
-  auto &gc          = config_.gicp_config_;
-  gc.max_corr_dist_ = config_.voxel_res_ * gc.scale_factor_for_corr_dist_;
+  config_.gicp_config_.max_corr_dist_ =
+      config_.voxel_res_ * config_.gicp_config_.scale_factor_for_corr_dist_;
 
   src_cloud_.reset(new pcl::PointCloud<PointType>());
   tgt_cloud_.reset(new pcl::PointCloud<PointType>());
@@ -21,6 +36,7 @@ LoopClosure::LoopClosure(const LoopClosureConfig &config, const rclcpp::Logger &
   local_reg_handler_->setNumThreads(gc.num_threads_);
   local_reg_handler_->setCorrespondenceRandomness(gc.correspondence_randomness_);
   local_reg_handler_->setMaxCorrespondenceDistance(gc.max_corr_dist_);
+  local_reg_handler_->setMaximumIterations(gc.max_num_iter_);
   local_reg_handler_->setVoxelResolution(config.voxel_res_);
   local_reg_handler_->setRegistrationType("VGICP");  // "VGICP" or "GICP"
 }
@@ -31,7 +47,8 @@ LoopClosure::~LoopClosure() {}
 // To address this, we use the is_multilayer_env_ parameter.
 // If true, full 3D distance (including Z) is considered for loop detection.
 // If false, we ignore Z and compute distance on the XY plane only.
-double LoopClosure::calculateDistance(const Eigen::Matrix4d &pose1, const Eigen::Matrix4d &pose2) {
+double LoopClosure::calculateDistance(const Eigen::Matrix4d &pose1,
+                                      const Eigen::Matrix4d &pose2) const {
   if (config_.is_multilayer_env_) {
     return (pose1.block<3, 1>(0, 3) - pose2.block<3, 1>(0, 3)).norm();
   } else {
@@ -40,21 +57,22 @@ double LoopClosure::calculateDistance(const Eigen::Matrix4d &pose1, const Eigen:
 }
 
 LoopCandidates LoopClosure::getLoopCandidatesFromQuery(
-    const PoseGraphNode &query_frame,
-    const std::vector<PoseGraphNode> &keyframes) {
+    const kiss_matcher_slam::Keyframe &query_frame,
+    const std::vector<kiss_matcher_slam::Keyframe> &keyframes) const {
   LoopCandidates candidates;
   candidates.reserve(keyframes.size() / 100);  // heuristic: expect ~1% to be valid
 
   const auto &loop_det_radi      = config_.loop_detection_radius_;
   const auto &loop_det_tdiff_thr = config_.loop_detection_timediff_threshold_;
 
+  if (keyframes.size() < 2) return candidates;
   for (size_t idx = 0; idx < keyframes.size() - 1; ++idx) {
-    double dist = calculateDistance(keyframes[idx].pose_corrected_, query_frame.pose_corrected_);
-    double time_diff = query_frame.timestamp_ - keyframes[idx].timestamp_;
+    double dist = calculateDistance(keyframes[idx].optimized_pose, query_frame.optimized_pose);
+    double time_diff = query_frame.timestamp - keyframes[idx].timestamp;
 
     if (dist < loop_det_radi && time_diff > loop_det_tdiff_thr) {
       LoopCandidate c;
-      c.idx_      = keyframes[idx].idx_;
+      c.idx_      = keyframes[idx].id;
       c.distance_ = dist;
       c.found_    = true;
       candidates.emplace_back(c);
@@ -64,7 +82,7 @@ LoopCandidates LoopClosure::getLoopCandidatesFromQuery(
   return candidates;
 }
 
-LoopCandidate LoopClosure::getClosestCandidate(const LoopCandidates &candidates) {
+LoopCandidate LoopClosure::getClosestCandidate(const LoopCandidates &candidates) const {
   if (candidates.empty()) return LoopCandidate();
 
   return *std::min_element(
@@ -73,8 +91,9 @@ LoopCandidate LoopClosure::getClosestCandidate(const LoopCandidates &candidates)
       });
 }
 
-LoopIdxPairs LoopClosure::fetchClosestLoopCandidate(const PoseGraphNode &query_frame,
-                                                    const std::vector<PoseGraphNode> &keyframes) {
+LoopIdxPairs LoopClosure::fetchClosestLoopCandidate(
+    const kiss_matcher_slam::Keyframe &query_frame,
+    const std::vector<kiss_matcher_slam::Keyframe> &keyframes) const {
   const auto &candidates = getLoopCandidatesFromQuery(query_frame, keyframes);
   if (candidates.empty()) {
     return {};
@@ -84,12 +103,13 @@ LoopIdxPairs LoopClosure::fetchClosestLoopCandidate(const PoseGraphNode &query_f
   // NOTE(hlim): While it outputs a single index pair,
   // for compatabiliy, I decided to use `LoopIdxPairs` instead of `LoopIdxPair`.
   LoopIdxPairs idx_pairs;
-  idx_pairs.emplace_back(query_frame.idx_, candidate.idx_);
+  idx_pairs.emplace_back(query_frame.id, candidate.idx_);
   return idx_pairs;
 }
 
-LoopIdxPairs LoopClosure::fetchLoopCandidates(const PoseGraphNode &query_frame,
-                                              const std::vector<PoseGraphNode> &keyframes,
+LoopIdxPairs LoopClosure::fetchLoopCandidates(
+    const kiss_matcher_slam::Keyframe &query_frame,
+    const std::vector<kiss_matcher_slam::Keyframe> &keyframes,
                                               const size_t num_max_candidates,
                                               const double reliable_window_sec) {
   // Case A.
@@ -124,20 +144,25 @@ LoopIdxPairs LoopClosure::fetchLoopCandidates(const PoseGraphNode &query_frame,
   LoopIdxPairs idx_pairs;
   size_t num_selected = std::min(num_max_candidates, candidates.size());
   for (size_t i = 0; i < num_selected; ++i) {
-    idx_pairs.emplace_back(query_frame.idx_, candidates[i].idx_);
+    idx_pairs.emplace_back(query_frame.id, candidates[i].idx_);
   }
 
   return idx_pairs;
 }
 
-NodePair LoopClosure::setSrcAndTgtCloud(const std::vector<PoseGraphNode> &keyframes,
-                                        const size_t src_idx,
-                                        const size_t tgt_idx,
-                                        const size_t num_submap_keyframes,
-                                        const double voxel_res,
-                                        const bool enable_global_registration) {
+NodePair LoopClosure::setSrcAndTgtCloud(
+    const std::vector<kiss_matcher_slam::Keyframe> &keyframes,
+    const size_t src_idx,
+    const size_t tgt_idx,
+    const size_t num_submap_keyframes,
+    const double voxel_res,
+    const bool enable_global_registration) {
+  if (src_idx >= keyframes.size() || tgt_idx >= keyframes.size() || num_submap_keyframes == 0 ||
+      !std::isfinite(voxel_res) || voxel_res <= 0.0) {
+    throw std::invalid_argument("invalid keyframe index or submap configuration");
+  }
   const size_t submap_range = num_submap_keyframes / 2;
-  const size_t num_approx   = keyframes[src_idx].scan_.size() * num_submap_keyframes;
+  const size_t num_approx   = keyframes[src_idx].cloud.size() * num_submap_keyframes;
 
   pcl::PointCloud<PointType> tgt_accum, src_accum;
   src_accum.reserve(num_approx);
@@ -149,7 +174,7 @@ NodePair LoopClosure::setSrcAndTgtCloud(const std::vector<PoseGraphNode> &keyfra
     const size_t start = (center_idx < submap_range) ? 0 : center_idx - submap_range;
     const size_t end   = std::min(center_idx + submap_range + 1, keyframes.size());
     for (size_t i = start; i < end; ++i) {
-      accum += transformPcd(keyframes[i].scan_, keyframes[i].pose_corrected_);
+      accum += transformPcd(keyframes[i].cloud, keyframes[i].optimized_pose);
     }
   };
 
@@ -157,9 +182,9 @@ NodePair LoopClosure::setSrcAndTgtCloud(const std::vector<PoseGraphNode> &keyfra
     accumulateSubmap(src_idx, src_accum);
     accumulateSubmap(tgt_idx, tgt_accum);
   } else {
-    src_accum = transformPcd(keyframes[src_idx].scan_, keyframes[src_idx].pose_corrected_);
+    src_accum = transformPcd(keyframes[src_idx].cloud, keyframes[src_idx].optimized_pose);
     if (enable_global_registration) {
-      tgt_accum = transformPcd(keyframes[tgt_idx].scan_, keyframes[tgt_idx].pose_corrected_);
+      tgt_accum = transformPcd(keyframes[tgt_idx].cloud, keyframes[tgt_idx].optimized_pose);
     } else {
       // For ICP matching,
       // empirically scan-to-submap matching works better than scan-to-scan matching
@@ -179,6 +204,7 @@ RegOutput LoopClosure::icpAlignment(const pcl::PointCloud<PointType> &src,
                                     const pcl::PointCloud<PointType> &tgt) {
   RegOutput reg_output;
   aligned_->clear();
+  if (src.empty() || tgt.empty()) return reg_output;
   // merge subkeyframes before ICP
   pcl::PointCloud<PointType>::Ptr src_cloud(new pcl::PointCloud<PointType>());
   pcl::PointCloud<PointType>::Ptr tgt_cloud(new pcl::PointCloud<PointType>());
@@ -226,6 +252,7 @@ RegOutput LoopClosure::coarseToFineAlignment(const pcl::PointCloud<PointType> &s
                                              const pcl::PointCloud<PointType> &tgt) {
   RegOutput reg_output;
   coarse_aligned_->clear();
+  if (src.empty() || tgt.empty()) return reg_output;
 
   const auto &src_vec = convertCloudToVec(src);
   const auto &tgt_vec = convertCloudToVec(tgt);
@@ -267,8 +294,9 @@ RegOutput LoopClosure::coarseToFineAlignment(const pcl::PointCloud<PointType> &s
   return reg_output;
 }
 
-RegOutput LoopClosure::performLoopClosure(const PoseGraphNode &query_keyframe,
-                                          const std::vector<PoseGraphNode> &keyframes) {
+RegOutput LoopClosure::performLoopClosure(
+    const kiss_matcher_slam::Keyframe &query_keyframe,
+    const std::vector<kiss_matcher_slam::Keyframe> &keyframes) {
   const auto &loop_candidate = fetchClosestLoopCandidate(query_keyframe, keyframes);
   if (loop_candidate.empty()) {
     return RegOutput();
@@ -277,11 +305,12 @@ RegOutput LoopClosure::performLoopClosure(const PoseGraphNode &query_keyframe,
   return performLoopClosure(keyframes, query_idx, match_idx);
 }
 
-RegOutput LoopClosure::performLoopClosure(const std::vector<PoseGraphNode> &keyframes,
-                                          const size_t query_idx,
-                                          const size_t match_idx) {
+RegOutput LoopClosure::performLoopClosure(
+    const std::vector<kiss_matcher_slam::Keyframe> &keyframes,
+    const size_t query_idx,
+    const size_t match_idx) {
   RegOutput reg_output;
-  if (match_idx >= 0) {
+  if (query_idx < keyframes.size() && match_idx < keyframes.size()) {
     const auto &[src_cloud, tgt_cloud] = setSrcAndTgtCloud(keyframes,
                                                            query_idx,
                                                            match_idx,
