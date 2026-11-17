@@ -74,6 +74,7 @@ find_package(GTSAM REQUIRED)
 
 add_library(kiss_matcher_slam_core
   src/core/keyframe_selector.cpp
+  src/core/map_database.cpp
 )
 target_include_directories(kiss_matcher_slam_core PUBLIC include ${PCL_INCLUDE_DIRS})
 target_link_libraries(kiss_matcher_slam_core ${PCL_LIBRARIES})
@@ -159,6 +160,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_keyframe_selector test/test_keyframe_selector.cpp)
   target_include_directories(test_keyframe_selector PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_keyframe_selector kiss_matcher_slam_core ${PCL_LIBRARIES})
+
+  ament_add_gtest(test_map_database test/test_map_database.cpp)
+  target_include_directories(test_map_database PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_map_database kiss_matcher_slam_core ${PCL_LIBRARIES})
 endif()
 
 install(DIRECTORY launch config rviz docs
