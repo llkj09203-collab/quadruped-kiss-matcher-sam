@@ -217,15 +217,12 @@ PoseGraphManager::~PoseGraphManager() {
   if (save_map_bag_) {
     RCLCPP_INFO(this->get_logger(), "NOTE(hlim): skipping final bag save in ROS2 example code.");
   }
-  if (save_map_pcd_ && !keyframes_.empty()) {
+  const auto keyframes = map_database_.snapshot();
+  if (save_map_pcd_ && !keyframes.empty()) {
     pcl::PointCloud<PointType>::Ptr corrected_map(new pcl::PointCloud<PointType>());
-    corrected_map->reserve(keyframes_[0].scan_.size() * keyframes_.size());
-
-    {
-      std::lock_guard<std::mutex> lock(keyframes_mutex_);
-      for (size_t i = 0; i < keyframes_.size(); ++i) {
-        *corrected_map += transformPcd(keyframes_[i].scan_, keyframes_[i].pose_corrected_);
-      }
+    corrected_map->reserve(keyframes.front().cloud.size() * keyframes.size());
+    for (const auto &keyframe : keyframes) {
+      *corrected_map += transformPcd(keyframe.cloud, keyframe.optimized_pose);
     }
     const auto &voxelized_map = voxelize(corrected_map, save_voxel_res_);
     const fs::path sequence_dir = fs::path(output_directory_) / seq_name_;
@@ -283,10 +280,10 @@ void PoseGraphManager::writeTrajectoryProducts() {
   fs::create_directories(sequence_dir);
   std::ofstream optimized_file(sequence_dir / "optimized_trajectory_tum.txt");
   optimized_file << "# timestamp x y z qx qy qz qw\n";
-  std::lock_guard<std::mutex> lock(keyframes_mutex_);
-  for (size_t i = 0; i < keyframes_.size() && i < corrected_esti_.size(); ++i) {
+  const auto keyframes = map_database_.snapshot();
+  for (size_t i = 0; i < keyframes.size() && i < corrected_esti_.size(); ++i) {
     const auto pose = gtsamToPoseStamped(corrected_esti_.at<gtsam::Pose3>(i), map_frame_);
-    optimized_file << std::fixed << std::setprecision(9) << keyframes_[i].timestamp_ << " "
+    optimized_file << std::fixed << std::setprecision(9) << keyframes[i].timestamp << " "
                    << pose.pose.position.x << " " << pose.pose.position.y << " "
                    << pose.pose.position.z << " " << pose.pose.orientation.x << " "
                    << pose.pose.orientation.y << " " << pose.pose.orientation.z << " "
@@ -310,7 +307,7 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
   static size_t latest_keyframe_idx = 0;
 
   // NOTE(hlim): For clarification, 'current' refers to the real-time incoming messages,
-  // while 'latest' indicates the last keyframe information already appended to keyframes_.
+  // while 'latest' indicates the last keyframe stored in map_database_.
   Eigen::Matrix4d current_odom = current_frame_.pose_;
   current_frame_               = PoseGraphNode(
       *odom_msg, *scan_msg, latest_keyframe_idx, scan_voxel_res_, store_voxelized_scan_);
@@ -321,7 +318,7 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
   visualizeCurrentData(current_odom, odom_msg->header.stamp, scan_msg->header.frame_id);
 
   if (!is_initialized_) {
-    keyframes_.push_back(current_frame_);
+    map_database_.append(current_frame_);
     appendKeyframePose(current_frame_);
     saveKeyframeIncrementally(current_frame_);
 
@@ -338,19 +335,17 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
 
   } else {
     const auto t_keyframe_processing = local_timer.toc();
+    const auto latest_keyframe = map_database_.latest();
     if (keyframe_selector_.shouldCreate(current_frame_.pose_corrected_,
                                         current_frame_.timestamp_,
-                                        keyframes_.back().pose_corrected_,
-                                        keyframes_.back().timestamp_)) {
-      {
-        std::lock_guard<std::mutex> lock(keyframes_mutex_);
-        keyframes_.push_back(current_frame_);
-      }
+                                        latest_keyframe.optimized_pose,
+                                        latest_keyframe.timestamp)) {
+      map_database_.append(current_frame_);
       saveKeyframeIncrementally(current_frame_);
 
       auto odom_noise = diagonalNoise(odom_variances_);
 
-      gtsam::Pose3 pose_from = eigenToGtsam(keyframes_[latest_keyframe_idx - 1].pose_corrected_);
+      gtsam::Pose3 pose_from = eigenToGtsam(latest_keyframe.optimized_pose);
       gtsam::Pose3 pose_to   = eigenToGtsam(current_frame_.pose_corrected_);
 
       {
@@ -415,9 +410,13 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
         odom_delta_ = Eigen::Matrix4d::Identity();
       }
       if (loop_closure_added_) {
-        std::lock_guard<std::mutex> lock(keyframes_mutex_);
+        std::vector<kiss_matcher_slam::MapDatabase::PoseUpdate> pose_updates;
+        pose_updates.reserve(corrected_esti_.size());
         for (size_t i = 0; i < corrected_esti_.size(); ++i) {
-          keyframes_[i].pose_corrected_ = gtsamToEigen(corrected_esti_.at<gtsam::Pose3>(i));
+          pose_updates.emplace_back(i, gtsamToEigen(corrected_esti_.at<gtsam::Pose3>(i)));
+        }
+        if (!map_database_.updateOptimizedPoses(pose_updates)) {
+          throw std::runtime_error("pose graph result does not match the map database");
         }
         loop_closure_added_ = false;
       }
@@ -428,7 +427,7 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
       RCLCPP_INFO(
           this->get_logger(),
           "# of Keyframes: %zu. Timing (msec) → Total: %.1f | Keyframe: %.1f | Optim.: %.1f",
-          keyframes_.size(),
+          map_database_.size(),
           t_total,
           t_keyframe_processing,
           t_optim);
@@ -456,39 +455,32 @@ void PoseGraphManager::buildMap() {
   static size_t start_idx = 0;
 
   if (map_pub_->get_subscription_count() > 0) {
-    {
-      std::lock_guard<std::mutex> lock(keyframes_mutex_);
-      if (need_map_update_) {
-        map_cloud_->clear();
-        start_idx = 0;
-      }
-
-      if (keyframes_.empty()) return;
-
-      // NOTE(hlim): Building the full map causes RViz delay when keyframes > 500.
-      // Since the map is for visualization only, we apply a heuristic to reduce cost.
-      for (size_t i = start_idx; i < keyframes_.size(); ++i) {
-        const auto &i_th_scan = [&]() {
-          // It's already voxelized
-          if (store_voxelized_scan_) {
-            return keyframes_[i].scan_;
-          }
-
-          if (keyframes_[i].voxelized_scan_.empty()) {
-            keyframes_[i].voxelized_scan_ = *voxelize(keyframes_[i].scan_, scan_voxel_res_);
-          }
-          return keyframes_[i].voxelized_scan_;
-        }();
-
-        *map_cloud_ += transformPcd(i_th_scan, keyframes_[i].pose_corrected_);
-      }
-
-      start_idx = keyframes_.size();
+    if (need_map_update_) {
+      map_cloud_->clear();
+      start_idx = 0;
     }
+
+    auto keyframes = map_database_.snapshot();
+    if (keyframes.empty()) return;
+
+    // NOTE(hlim): Building the full map causes RViz delay when keyframes > 500.
+    // Since the map is for visualization only, we apply a heuristic to reduce cost.
+    for (size_t i = start_idx; i < keyframes.size(); ++i) {
+      if (!store_voxelized_scan_ && keyframes[i].visualization_cloud.empty()) {
+        keyframes[i].visualization_cloud = *voxelize(keyframes[i].cloud, scan_voxel_res_);
+        if (!map_database_.setVisualizationCloud(i, keyframes[i].visualization_cloud)) {
+          throw std::runtime_error("failed to cache a keyframe visualization cloud");
+        }
+      }
+      const auto &scan = store_voxelized_scan_ ? keyframes[i].cloud
+                                                : keyframes[i].visualization_cloud;
+      *map_cloud_ += transformPcd(scan, keyframes[i].optimized_pose);
+    }
+    start_idx = keyframes.size();
 
     const auto &voxelized_map = voxelize(map_cloud_, map_voxel_res_);
     map_pub_->publish(
-        toROSMsg(*voxelized_map, map_frame_, toRclcppTime(keyframes_.back().timestamp_)));
+        toROSMsg(*voxelized_map, map_frame_, toRclcppTime(keyframes.back().timestamp)));
   }
 
   if (need_map_update_) {
@@ -497,16 +489,19 @@ void PoseGraphManager::buildMap() {
 }
 
 void PoseGraphManager::detectLoopClosureByLoopDetector() {
-  std::lock_guard<std::mutex> lock(keyframes_mutex_);
-  if (!is_initialized_ || keyframes_.empty()) return;
-  auto &query = keyframes_.back();
-  if (query.loop_detector_processed_) {
-    return;
-  }
-  query.loop_detector_processed_ = true;
+  if (!is_initialized_ || map_database_.empty()) return;
+  const auto claimed_id = map_database_.claimLatestForPlaceRecognition();
+  if (!claimed_id) return;
+
+  auto stored_keyframes = map_database_.snapshot();
+  stored_keyframes.resize(*claimed_id + 1);
+  std::vector<PoseGraphNode> keyframes;
+  keyframes.reserve(stored_keyframes.size());
+  for (const auto &keyframe : stored_keyframes) keyframes.emplace_back(keyframe);
+  const auto &query = keyframes.back();
 
   kiss_matcher::TicToc ld_timer;
-  const auto &loop_idx_pairs = loop_detector_->fetchLoopCandidates(query, keyframes_);
+  const auto &loop_idx_pairs = loop_detector_->fetchLoopCandidates(query, keyframes);
 
   for (const auto &loop_candidate : loop_idx_pairs) {
     loop_idx_pair_queue_.push(loop_candidate);
@@ -516,15 +511,18 @@ void PoseGraphManager::detectLoopClosureByLoopDetector() {
 }
 
 void PoseGraphManager::detectLoopClosureByNNSearch() {
-  std::lock_guard<std::mutex> lock(keyframes_mutex_);
-  if (!is_initialized_ || keyframes_.empty()) return;
-  auto &query = keyframes_.back();
-  if (query.nnsearch_processed_) {
-    return;
-  }
-  query.nnsearch_processed_ = true;
+  if (!is_initialized_ || map_database_.empty()) return;
+  const auto claimed_id = map_database_.claimLatestForProximitySearch();
+  if (!claimed_id) return;
 
-  const auto &loop_idx_pairs = loop_closure_->fetchLoopCandidates(query, keyframes_);
+  auto stored_keyframes = map_database_.snapshot();
+  stored_keyframes.resize(*claimed_id + 1);
+  std::vector<PoseGraphNode> keyframes;
+  keyframes.reserve(stored_keyframes.size());
+  for (const auto &keyframe : stored_keyframes) keyframes.emplace_back(keyframe);
+  const auto &query = keyframes.back();
+
+  const auto &loop_idx_pairs = loop_closure_->fetchLoopCandidates(query, keyframes);
 
   for (const auto &loop_candidate : loop_idx_pairs) {
     loop_idx_pair_queue_.push(loop_candidate);
@@ -539,12 +537,20 @@ void PoseGraphManager::performRegistration() {
   const auto [query_idx, match_idx] = loop_idx_pair_queue_.front();
   loop_idx_pair_queue_.pop();
 
-  const RegOutput &reg_output = loop_closure_->performLoopClosure(keyframes_, query_idx, match_idx);
+  const auto stored_keyframes = map_database_.snapshot();
+  if (query_idx >= stored_keyframes.size() || match_idx >= stored_keyframes.size()) {
+    RCLCPP_ERROR(get_logger(), "Discarding loop candidate with an invalid keyframe index");
+    return;
+  }
+  std::vector<PoseGraphNode> keyframes;
+  keyframes.reserve(stored_keyframes.size());
+  for (const auto &keyframe : stored_keyframes) keyframes.emplace_back(keyframe);
+  const RegOutput &reg_output = loop_closure_->performLoopClosure(keyframes, query_idx, match_idx);
 
   if (reg_output.is_valid_) {
     RCLCPP_INFO(this->get_logger(), "LC accepted. Overlapness: %.3f", reg_output.overlapness_);
-    gtsam::Pose3 pose_from = eigenToGtsam(reg_output.pose_ * keyframes_[query_idx].pose_corrected_);
-    gtsam::Pose3 pose_to   = eigenToGtsam(keyframes_[match_idx].pose_corrected_);
+    gtsam::Pose3 pose_from = eigenToGtsam(reg_output.pose_ * keyframes[query_idx].pose_corrected_);
+    gtsam::Pose3 pose_to   = eigenToGtsam(keyframes[match_idx].pose_corrected_);
 
     std::vector<double> loop_variances = loop_variances_;
     if (adaptive_loop_noise_) {
@@ -685,19 +691,16 @@ void PoseGraphManager::visualizeLoopClosureClouds() {
     return;
   }
 
-  rclcpp::Time query_timestamp;
-  {
-    std::lock_guard<std::mutex> lock(keyframes_mutex_);
-    if (succeeded_query_idx_ >= keyframes_.size()) {
-      RCLCPP_ERROR(this->get_logger(),
-                   "Invalid successful loop-closure keyframe index: %zu (keyframe count: %zu)",
-                   succeeded_query_idx_,
-                   keyframes_.size());
-      need_lc_cloud_vis_update_ = false;
-      return;
-    }
-    query_timestamp = toRclcppTime(keyframes_[succeeded_query_idx_].timestamp_);
+  const auto keyframes = map_database_.snapshot();
+  if (succeeded_query_idx_ >= keyframes.size()) {
+    RCLCPP_ERROR(this->get_logger(),
+                 "Invalid successful loop-closure keyframe index: %zu (keyframe count: %zu)",
+                 succeeded_query_idx_,
+                 keyframes.size());
+    need_lc_cloud_vis_update_ = false;
+    return;
   }
+  const auto query_timestamp = toRclcppTime(keyframes[succeeded_query_idx_].timestamp);
 
   debug_src_pub_->publish(toROSMsg(loop_closure_->getSourceCloud(), map_frame_, query_timestamp));
   debug_tgt_pub_->publish(toROSMsg(loop_closure_->getTargetCloud(), map_frame_, query_timestamp));
@@ -768,6 +771,7 @@ void PoseGraphManager::saveFlagCallback(const std_msgs::msg::String::ConstShared
   std::string save_dir        = !msg->data.empty() ? msg->data : package_path_;
   std::string seq_directory   = save_dir + "/" + seq_name_;
   std::string scans_directory = seq_directory + "/scans";
+  const auto keyframes = map_database_.snapshot();
 
   if (save_in_kitti_format_) {
     RCLCPP_INFO(this->get_logger(),
@@ -783,23 +787,20 @@ void PoseGraphManager::saveFlagCallback(const std_msgs::msg::String::ConstShared
     std::ofstream tum_pose_file(seq_directory + "/poses_tum.txt");
     tum_pose_file << "#timestamp x y z qx qy qz qw\n";
 
-    {
-      std::lock_guard<std::mutex> lock(keyframes_mutex_);
-      for (size_t i = 0; i < keyframes_.size(); ++i) {
+      for (size_t i = 0; i < keyframes.size(); ++i) {
         std::stringstream ss_;
         ss_ << scans_directory << "/" << std::setw(6) << std::setfill('0') << i << ".pcd";
         RCLCPP_INFO(this->get_logger(), "Saving %s...", ss_.str().c_str());
-        pcl::io::savePCDFileASCII<PointType>(ss_.str(), keyframes_[i].scan_);
+        pcl::io::savePCDFileASCII<PointType>(ss_.str(), keyframes[i].cloud);
 
-        const auto &pose_ = keyframes_[i].pose_corrected_;
+        const auto &pose_ = keyframes[i].optimized_pose;
         kitti_pose_file << pose_(0, 0) << " " << pose_(0, 1) << " " << pose_(0, 2) << " "
                         << pose_(0, 3) << " " << pose_(1, 0) << " " << pose_(1, 1) << " "
                         << pose_(1, 2) << " " << pose_(1, 3) << " " << pose_(2, 0) << " "
                         << pose_(2, 1) << " " << pose_(2, 2) << " " << pose_(2, 3) << "\n";
 
-        const auto &lidar_optim_pose_ =
-            eigenToPoseStamped(keyframes_[i].pose_corrected_, map_frame_);
-        tum_pose_file << std::fixed << std::setprecision(8) << keyframes_[i].timestamp_ << " "
+        const auto &lidar_optim_pose_ = eigenToPoseStamped(keyframes[i].optimized_pose, map_frame_);
+        tum_pose_file << std::fixed << std::setprecision(8) << keyframes[i].timestamp << " "
                       << lidar_optim_pose_.pose.position.x << " "
                       << lidar_optim_pose_.pose.position.y << " "
                       << lidar_optim_pose_.pose.position.z << " "
@@ -807,7 +808,6 @@ void PoseGraphManager::saveFlagCallback(const std_msgs::msg::String::ConstShared
                       << lidar_optim_pose_.pose.orientation.y << " "
                       << lidar_optim_pose_.pose.orientation.z << " "
                       << lidar_optim_pose_.pose.orientation.w << "\n";
-      }
     }
     kitti_pose_file.close();
     tum_pose_file.close();
@@ -818,14 +818,14 @@ void PoseGraphManager::saveFlagCallback(const std_msgs::msg::String::ConstShared
                 "NOTE(hlim): rosbag2 saving not directly implemented; skipping.");
   }
   if (save_map_pcd_) {
+    if (keyframes.empty()) {
+      RCLCPP_WARN(this->get_logger(), "No keyframes available; skipping map save");
+      return;
+    }
     pcl::PointCloud<PointType>::Ptr corrected_map(new pcl::PointCloud<PointType>());
-    corrected_map->reserve(keyframes_[0].scan_.size() * keyframes_.size());
-
-    {
-      std::lock_guard<std::mutex> lock(keyframes_mutex_);
-      for (size_t i = 0; i < keyframes_.size(); ++i) {
-        *corrected_map += transformPcd(keyframes_[i].scan_, keyframes_[i].pose_corrected_);
-      }
+    corrected_map->reserve(keyframes.front().cloud.size() * keyframes.size());
+    for (const auto &keyframe : keyframes) {
+      *corrected_map += transformPcd(keyframe.cloud, keyframe.optimized_pose);
     }
     const auto &voxelized_map = voxelize(corrected_map, save_voxel_res_);
     pcl::io::savePCDFileASCII<PointType>(seq_directory + "/" + seq_name_ + "_map.pcd",

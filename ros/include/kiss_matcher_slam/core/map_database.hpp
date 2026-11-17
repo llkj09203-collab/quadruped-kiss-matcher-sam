@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <shared_mutex>
 #include <utility>
 #include <vector>
@@ -29,6 +30,11 @@ class MapDatabase {
 
   // Apply the complete batch or nothing. Invalid input leaves all data intact.
   bool updateOptimizedPoses(const std::vector<PoseUpdate> &updates);
+  bool markPlaceRecognitionProcessed(std::size_t id);
+  bool markProximitySearchProcessed(std::size_t id);
+  std::optional<std::size_t> claimLatestForPlaceRecognition();
+  std::optional<std::size_t> claimLatestForProximitySearch();
+  bool setVisualizationCloud(std::size_t id, pcl::PointCloud<SlamPoint> cloud);
   void clear();
 
  private:

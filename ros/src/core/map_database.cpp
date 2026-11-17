@@ -59,6 +59,42 @@ bool MapDatabase::updateOptimizedPoses(const std::vector<PoseUpdate> &updates) {
   return true;
 }
 
+bool MapDatabase::markPlaceRecognitionProcessed(const std::size_t id) {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  if (id >= keyframes_.size() || keyframes_[id].place_recognition_processed) return false;
+  keyframes_[id].place_recognition_processed = true;
+  return true;
+}
+
+bool MapDatabase::markProximitySearchProcessed(const std::size_t id) {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  if (id >= keyframes_.size() || keyframes_[id].proximity_search_processed) return false;
+  keyframes_[id].proximity_search_processed = true;
+  return true;
+}
+
+std::optional<std::size_t> MapDatabase::claimLatestForPlaceRecognition() {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  if (keyframes_.empty() || keyframes_.back().place_recognition_processed) return std::nullopt;
+  keyframes_.back().place_recognition_processed = true;
+  return keyframes_.back().id;
+}
+
+std::optional<std::size_t> MapDatabase::claimLatestForProximitySearch() {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  if (keyframes_.empty() || keyframes_.back().proximity_search_processed) return std::nullopt;
+  keyframes_.back().proximity_search_processed = true;
+  return keyframes_.back().id;
+}
+
+bool MapDatabase::setVisualizationCloud(const std::size_t id,
+                                        pcl::PointCloud<SlamPoint> cloud) {
+  std::unique_lock<std::shared_mutex> lock(mutex_);
+  if (id >= keyframes_.size()) return false;
+  keyframes_[id].visualization_cloud = std::move(cloud);
+  return true;
+}
+
 void MapDatabase::clear() {
   std::unique_lock<std::shared_mutex> lock(mutex_);
   keyframes_.clear();

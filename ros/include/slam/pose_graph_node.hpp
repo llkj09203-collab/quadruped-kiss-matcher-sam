@@ -24,6 +24,8 @@ struct PoseGraphNode : public kiss_matcher_slam::Keyframe {
   bool &loop_detector_processed_ = place_recognition_processed;
 
   PoseGraphNode() = default;
+  explicit PoseGraphNode(const kiss_matcher_slam::Keyframe &other)
+      : kiss_matcher_slam::Keyframe(other) {}
   PoseGraphNode(const PoseGraphNode &other)
       : kiss_matcher_slam::Keyframe(other) {}
   PoseGraphNode(PoseGraphNode &&other) noexcept

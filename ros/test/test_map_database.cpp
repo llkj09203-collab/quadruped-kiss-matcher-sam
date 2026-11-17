@@ -69,6 +69,31 @@ TEST(MapDatabase, PoseBatchIsAtomic) {
   EXPECT_DOUBLE_EQ(database.at(1).optimized_pose(0, 3), 10.0);
 }
 
+TEST(MapDatabase, ProcessingFlagsCanOnlyBeClaimedOnce) {
+  kiss_matcher_slam::MapDatabase database;
+  database.append(makeKeyframe(1.0));
+
+  EXPECT_TRUE(database.markPlaceRecognitionProcessed(0));
+  EXPECT_FALSE(database.markPlaceRecognitionProcessed(0));
+  EXPECT_TRUE(database.markProximitySearchProcessed(0));
+  EXPECT_FALSE(database.markProximitySearchProcessed(0));
+  EXPECT_FALSE(database.markPlaceRecognitionProcessed(1));
+}
+
+TEST(MapDatabase, LatestProcessingClaimIsAtomicAndTracksNewFrames) {
+  kiss_matcher_slam::MapDatabase database;
+  EXPECT_FALSE(database.claimLatestForPlaceRecognition().has_value());
+
+  database.append(makeKeyframe(1.0));
+  ASSERT_TRUE(database.claimLatestForPlaceRecognition().has_value());
+  EXPECT_EQ(*database.claimLatestForProximitySearch(), 0U);
+  EXPECT_FALSE(database.claimLatestForPlaceRecognition().has_value());
+
+  database.append(makeKeyframe(2.0));
+  EXPECT_EQ(*database.claimLatestForPlaceRecognition(), 1U);
+  EXPECT_EQ(*database.claimLatestForProximitySearch(), 1U);
+}
+
 TEST(MapDatabase, ConcurrentReadersObserveConsistentSnapshots) {
   kiss_matcher_slam::MapDatabase database;
   constexpr std::size_t count = 100;

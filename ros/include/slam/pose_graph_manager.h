@@ -58,6 +58,7 @@
 
 #include "../tictoc.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
+#include "kiss_matcher_slam/core/map_database.hpp"
 #include "slam/loop_closure.h"
 #include "slam/loop_detector.h"
 #include "slam/pose_graph_node.hpp"
@@ -115,7 +116,6 @@ class PoseGraphManager : public rclcpp::Node {
   std::string output_directory_;
 
   std::mutex realtime_pose_mutex_;
-  std::mutex keyframes_mutex_;
   std::mutex graph_mutex_;
   std::mutex lc_mutex_;
   std::mutex vis_mutex_;
@@ -124,7 +124,7 @@ class PoseGraphManager : public rclcpp::Node {
   Eigen::Matrix4d last_corrected_pose_ = Eigen::Matrix4d::Identity();
   Eigen::Matrix4d odom_delta_          = Eigen::Matrix4d::Identity();
   kiss_matcher::PoseGraphNode current_frame_;
-  std::vector<kiss_matcher::PoseGraphNode> keyframes_;
+  kiss_matcher_slam::MapDatabase map_database_;
 
   bool is_initialized_           = false;
   bool loop_closure_added_       = false;
