@@ -76,7 +76,9 @@ add_library(kiss_matcher_slam_core
   src/core/gps_altitude_manager.cpp
   src/core/incremental_map_builder.cpp
   src/core/keyframe_selector.cpp
+  src/core/loop_candidate_queue.cpp
   src/core/map_database.cpp
+  src/core/mapping_runtime_state.cpp
   src/core/map_product_writer.cpp
   src/core/pose_graph_backend.cpp
   src/core/realtime_pose_tracker.cpp
@@ -174,6 +176,14 @@ if(BUILD_TESTING)
   ament_add_gtest(test_keyframe_selector test/test_keyframe_selector.cpp)
   target_include_directories(test_keyframe_selector PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_keyframe_selector kiss_matcher_slam_core ${PCL_LIBRARIES})
+
+  ament_add_gtest(test_loop_candidate_queue test/test_loop_candidate_queue.cpp)
+  target_include_directories(test_loop_candidate_queue PRIVATE include)
+  target_link_libraries(test_loop_candidate_queue kiss_matcher_slam_core)
+
+  ament_add_gtest(test_mapping_runtime_state test/test_mapping_runtime_state.cpp)
+  target_include_directories(test_mapping_runtime_state PRIVATE include)
+  target_link_libraries(test_mapping_runtime_state kiss_matcher_slam_core)
 
   ament_add_gtest(test_map_database test/test_map_database.cpp)
   target_include_directories(test_map_database PRIVATE include ${PCL_INCLUDE_DIRS})

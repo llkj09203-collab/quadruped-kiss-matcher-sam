@@ -10,8 +10,6 @@
 #include <deque>
 #include <iostream>
 #include <memory>
-#include <mutex>
-#include <queue>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -52,7 +50,9 @@
 #include "kiss_matcher_slam/core/gps_altitude_manager.hpp"
 #include "kiss_matcher_slam/core/incremental_map_builder.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
+#include "kiss_matcher_slam/core/loop_candidate_queue.hpp"
 #include "kiss_matcher_slam/core/map_database.hpp"
+#include "kiss_matcher_slam/core/mapping_runtime_state.hpp"
 #include "kiss_matcher_slam/core/map_product_writer.hpp"
 #include "kiss_matcher_slam/core/pose_graph_backend.hpp"
 #include "kiss_matcher_slam/core/realtime_pose_tracker.hpp"
@@ -110,9 +110,8 @@ class PoseGraphManager : public rclcpp::Node {
   std::string seq_name_;
   std::string output_directory_;
 
-  std::mutex lc_mutex_;
-
   kiss_matcher::PoseGraphNode current_frame_;
+  kiss_matcher_slam::MappingRuntimeState runtime_state_;
   kiss_matcher_slam::MapDatabase map_database_;
   std::unique_ptr<kiss_matcher_slam::MapProductWriter> map_product_writer_;
   kiss_matcher_slam::RealtimePoseTracker realtime_pose_tracker_;
@@ -120,9 +119,6 @@ class PoseGraphManager : public rclcpp::Node {
   std::unique_ptr<kiss_matcher_slam::GpsAltitudeManager> gps_altitude_manager_;
   std::unique_ptr<kiss_matcher_slam::IncrementalMapBuilder> map_builder_;
 
-  std::atomic<bool> is_initialized_{false};
-  std::atomic<bool> need_map_update_{false};
-  std::atomic<bool> need_graph_vis_update_{false};
   std::atomic<bool> need_lc_cloud_vis_update_{false};
 
   kiss_matcher_slam::PoseGraphBackend pose_graph_backend_;
@@ -143,7 +139,7 @@ class PoseGraphManager : public rclcpp::Node {
 
   size_t succeeded_query_idx_ = 0;
   // pose_graph_tools_msgs::msg::PoseGraph loop_msgs_;
-  std::queue<LoopIdxPair> loop_idx_pair_queue_;
+  kiss_matcher_slam::LoopCandidateQueue loop_candidate_queue_;
 
   kiss_matcher::TicToc timer_;
 

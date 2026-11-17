@@ -265,7 +265,7 @@ void PoseGraphManager::appendKeyframePose(const PoseGraphNode &node) {
 
 void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg,
                                     const sensor_msgs::msg::PointCloud2::ConstSharedPtr &scan_msg) {
-  static size_t latest_keyframe_idx = 0;
+  const size_t latest_keyframe_idx = runtime_state_.nextKeyframeId();
 
   // NOTE(hlim): For clarification, 'current' refers to the real-time incoming messages,
   // while 'latest' indicates the last keyframe stored in map_database_.
@@ -278,15 +278,14 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
 
   visualizeCurrentData(current_odom, odom_msg->header.stamp, scan_msg->header.frame_id);
 
-  if (!is_initialized_) {
+  if (!runtime_state_.initialized()) {
     map_database_.append(current_frame_);
     appendKeyframePose(current_frame_);
     saveKeyframeIncrementally(current_frame_);
 
     pose_graph_backend_.addPrior(
         latest_keyframe_idx, eigenToGtsam(current_frame_.pose_), prior_variances_);
-    ++latest_keyframe_idx;
-    is_initialized_ = true;
+    runtime_state_.commitKeyframe();
 
     RCLCPP_INFO(this->get_logger(), "The first node comes. Initialization complete.");
 
@@ -321,7 +320,7 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
             gps_constraint->huber_k);
       }
 
-      ++latest_keyframe_idx;
+      runtime_state_.commitKeyframe();
       appendKeyframePose(current_frame_);
 
       local_timer.tic();
@@ -340,8 +339,8 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
         if (!map_database_.updateOptimizedPoses(pose_updates)) {
           throw std::runtime_error("pose graph result does not match the map database");
         }
-        need_map_update_ = true;
-        need_graph_vis_update_ = true;
+        runtime_state_.requestMapRebuild();
+        runtime_state_.requestGraphRefresh();
       }
       writeTrajectoryProducts();
 
@@ -376,7 +375,7 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
 
 void PoseGraphManager::buildMap() {
   if (map_pub_->get_subscription_count() > 0) {
-    const bool rebuild_map = need_map_update_.exchange(false);
+    const bool rebuild_map = runtime_state_.consumeMapRebuildRequest();
     auto keyframes = map_database_.snapshot();
     if (keyframes.empty()) return;
     auto map_result = map_builder_->build(keyframes, rebuild_map);
@@ -391,7 +390,7 @@ void PoseGraphManager::buildMap() {
 }
 
 void PoseGraphManager::detectLoopClosureByScanContext() {
-  if (!scan_context_enabled_ || !is_initialized_ || map_database_.empty()) return;
+  if (!scan_context_enabled_ || !runtime_state_.initialized() || map_database_.empty()) return;
   const auto claimed_id = map_database_.claimLatestForPlaceRecognition();
   if (!claimed_id) return;
 
@@ -401,10 +400,7 @@ void PoseGraphManager::detectLoopClosureByScanContext() {
 
   const auto candidate = scan_context_detector_->detect(query, stored_keyframes);
   if (candidate) {
-    {
-      std::lock_guard<std::mutex> lock(lc_mutex_);
-      loop_idx_pair_queue_.emplace(query.id, candidate->keyframe_id);
-    }
+    loop_candidate_queue_.push({query.id, candidate->keyframe_id});
     if (scan_context_verbose_) {
       RCLCPP_INFO(get_logger(),
                   "Scan Context candidate: query=%zu match=%zu distance=%.3f yaw=%.3f rad",
@@ -417,7 +413,7 @@ void PoseGraphManager::detectLoopClosureByScanContext() {
 }
 
 void PoseGraphManager::detectLoopClosureByNNSearch() {
-  if (!is_initialized_ || map_database_.empty()) return;
+  if (!runtime_state_.initialized() || map_database_.empty()) return;
   const auto claimed_id = map_database_.claimLatestForProximitySearch();
   if (!claimed_id) return;
 
@@ -428,20 +424,15 @@ void PoseGraphManager::detectLoopClosureByNNSearch() {
   const auto &loop_idx_pairs = loop_closure_->fetchLoopCandidates(query, stored_keyframes);
 
   for (const auto &loop_candidate : loop_idx_pairs) {
-    std::lock_guard<std::mutex> lock(lc_mutex_);
-    loop_idx_pair_queue_.push(loop_candidate);
+    loop_candidate_queue_.push(loop_candidate);
   }
 }
 
 void PoseGraphManager::performRegistration() {
   kiss_matcher::TicToc reg_timer;
-  LoopIdxPair candidate;
-  {
-    std::lock_guard<std::mutex> lock(lc_mutex_);
-    if (loop_idx_pair_queue_.empty()) return;
-    candidate = loop_idx_pair_queue_.front();
-    loop_idx_pair_queue_.pop();
-  }
+  const auto queued_candidate = loop_candidate_queue_.tryPop();
+  if (!queued_candidate) return;
+  const auto candidate = *queued_candidate;
   const auto [query_idx, match_idx] = candidate;
 
   const auto stored_keyframes = map_database_.snapshot();
@@ -470,7 +461,7 @@ void PoseGraphManager::performRegistration() {
     visualization_state_.addLoopEdge(query_idx, match_idx);
     succeeded_query_idx_      = query_idx;
     need_lc_cloud_vis_update_ = true;
-    need_graph_vis_update_    = true;
+    runtime_state_.requestGraphRefresh();
 
     // --------------------------------------------------
     // TODO(hlim): resurrect pose_graph_tools_msgs
@@ -547,11 +538,11 @@ void PoseGraphManager::visualizeCurrentData(const Eigen::Matrix4d &current_odom,
 }
 
 void PoseGraphManager::visualizePoseGraph() {
-  if (!is_initialized_) {
+  if (!runtime_state_.initialized()) {
     return;
   }
 
-  if (need_graph_vis_update_.exchange(false)) {
+  if (runtime_state_.consumeGraphRefreshRequest()) {
     const auto estimates = pose_graph_backend_.estimates();
     std::vector<Eigen::Matrix4d> corrected_poses;
     corrected_poses.reserve(estimates.size());
