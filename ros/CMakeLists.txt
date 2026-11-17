@@ -77,6 +77,7 @@ add_library(kiss_matcher_slam_core
   src/core/map_database.cpp
   src/core/map_product_writer.cpp
   src/core/pose_graph_backend.cpp
+  src/core/realtime_pose_tracker.cpp
   src/core/scan_context_loop_detector.cpp
 )
 target_include_directories(kiss_matcher_slam_core PUBLIC include ${PCL_INCLUDE_DIRS})
@@ -174,6 +175,10 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pose_graph_backend test/test_pose_graph_backend.cpp)
   target_include_directories(test_pose_graph_backend PRIVATE include ${PCL_INCLUDE_DIRS})
   target_link_libraries(test_pose_graph_backend kiss_matcher_slam_core gtsam)
+
+  ament_add_gtest(test_realtime_pose_tracker test/test_realtime_pose_tracker.cpp)
+  target_include_directories(test_realtime_pose_tracker PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(test_realtime_pose_tracker kiss_matcher_slam_core)
 
   ament_add_gtest(test_scan_context_loop_detector test/test_scan_context_loop_detector.cpp)
   target_include_directories(test_scan_context_loop_detector PRIVATE include ${PCL_INCLUDE_DIRS})

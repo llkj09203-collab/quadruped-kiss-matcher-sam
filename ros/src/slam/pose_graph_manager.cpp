@@ -344,12 +344,8 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
       const auto optimization = pose_graph_backend_.optimize();
       const auto t_optim = local_timer.toc();
 
-      {
-        std::lock_guard<std::mutex> lock(realtime_pose_mutex_);
-        last_corrected_pose_ =
-            gtsamToEigen(optimization.estimates.at<gtsam::Pose3>(optimization.estimates.size() - 1));
-        odom_delta_ = Eigen::Matrix4d::Identity();
-      }
+      realtime_pose_tracker_.applyCorrection(
+          gtsamToEigen(optimization.estimates.at<gtsam::Pose3>(optimization.estimates.size() - 1)));
       if (optimization.loop_constraints_applied) {
         std::vector<kiss_matcher_slam::MapDatabase::PoseUpdate> pose_updates;
         pose_updates.reserve(optimization.estimates.size());
@@ -539,35 +535,32 @@ void PoseGraphManager::visualizeCurrentData(const Eigen::Matrix4d &current_odom,
                                             const std::string &frame_id) {
   // NOTE(hlim): Instead of visualizing only when adding keyframes (node-wise), which can feel
   // choppy, we visualize the current frame every cycle to ensure smoother, real-time visualization.
-  {
-    std::lock_guard<std::mutex> lock(realtime_pose_mutex_);
-    odom_delta_                    = odom_delta_ * current_odom.inverse() * current_frame_.pose_;
-    current_frame_.pose_corrected_ = last_corrected_pose_ * odom_delta_;
+  current_frame_.pose_corrected_ =
+      realtime_pose_tracker_.advance(current_odom, current_frame_.pose_);
 
-    geometry_msgs::msg::PoseStamped ps =
-        eigenToPoseStamped(current_frame_.pose_corrected_, map_frame_);
-    realtime_pose_pub_->publish(ps);
+  geometry_msgs::msg::PoseStamped ps =
+      eigenToPoseStamped(current_frame_.pose_corrected_, map_frame_);
+  realtime_pose_pub_->publish(ps);
 
-    nav_msgs::msg::Odometry optimized_odom;
-    optimized_odom.header = ps.header;
-    optimized_odom.child_frame_id = base_frame_.empty() ? frame_id : base_frame_;
-    optimized_odom.pose.pose = ps.pose;
-    optimized_odom_pub_->publish(optimized_odom);
+  nav_msgs::msg::Odometry optimized_odom;
+  optimized_odom.header = ps.header;
+  optimized_odom.child_frame_id = base_frame_.empty() ? frame_id : base_frame_;
+  optimized_odom.pose.pose = ps.pose;
+  optimized_odom_pub_->publish(optimized_odom);
 
-    geometry_msgs::msg::TransformStamped transform_stamped;
-    transform_stamped.header.stamp    = timestamp;
-    transform_stamped.header.frame_id = map_frame_;
-    transform_stamped.child_frame_id  = base_frame_.empty() ? frame_id : base_frame_;
-    Eigen::Quaterniond q(current_frame_.pose_corrected_.block<3, 3>(0, 0));
-    transform_stamped.transform.translation.x = current_frame_.pose_corrected_(0, 3);
-    transform_stamped.transform.translation.y = current_frame_.pose_corrected_(1, 3);
-    transform_stamped.transform.translation.z = current_frame_.pose_corrected_(2, 3);
-    transform_stamped.transform.rotation.x    = q.x();
-    transform_stamped.transform.rotation.y    = q.y();
-    transform_stamped.transform.rotation.z    = q.z();
-    transform_stamped.transform.rotation.w    = q.w();
-    tf_broadcaster_->sendTransform(transform_stamped);
-  }
+  geometry_msgs::msg::TransformStamped transform_stamped;
+  transform_stamped.header.stamp    = timestamp;
+  transform_stamped.header.frame_id = map_frame_;
+  transform_stamped.child_frame_id  = base_frame_.empty() ? frame_id : base_frame_;
+  Eigen::Quaterniond q(current_frame_.pose_corrected_.block<3, 3>(0, 0));
+  transform_stamped.transform.translation.x = current_frame_.pose_corrected_(0, 3);
+  transform_stamped.transform.translation.y = current_frame_.pose_corrected_(1, 3);
+  transform_stamped.transform.translation.z = current_frame_.pose_corrected_(2, 3);
+  transform_stamped.transform.rotation.x    = q.x();
+  transform_stamped.transform.rotation.y    = q.y();
+  transform_stamped.transform.rotation.z    = q.z();
+  transform_stamped.transform.rotation.w    = q.w();
+  tf_broadcaster_->sendTransform(transform_stamped);
 
   scan_pub_->publish(toROSMsg(
       transformPcd(current_frame_.scan_, current_frame_.pose_corrected_), map_frame_, timestamp));

@@ -52,6 +52,7 @@
 #include "kiss_matcher_slam/core/map_database.hpp"
 #include "kiss_matcher_slam/core/map_product_writer.hpp"
 #include "kiss_matcher_slam/core/pose_graph_backend.hpp"
+#include "kiss_matcher_slam/core/realtime_pose_tracker.hpp"
 #include "kiss_matcher_slam/core/scan_context_loop_detector.hpp"
 #include "slam/loop_closure.h"
 #include "slam/pose_graph_node.hpp"
@@ -104,16 +105,14 @@ class PoseGraphManager : public rclcpp::Node {
   std::string seq_name_;
   std::string output_directory_;
 
-  std::mutex realtime_pose_mutex_;
   std::mutex lc_mutex_;
   std::mutex vis_mutex_;
   std::mutex gps_mutex_;
 
-  Eigen::Matrix4d last_corrected_pose_ = Eigen::Matrix4d::Identity();
-  Eigen::Matrix4d odom_delta_          = Eigen::Matrix4d::Identity();
   kiss_matcher::PoseGraphNode current_frame_;
   kiss_matcher_slam::MapDatabase map_database_;
   std::unique_ptr<kiss_matcher_slam::MapProductWriter> map_product_writer_;
+  kiss_matcher_slam::RealtimePoseTracker realtime_pose_tracker_;
 
   bool is_initialized_           = false;
   bool need_map_update_          = false;
