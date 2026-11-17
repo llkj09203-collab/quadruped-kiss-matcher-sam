@@ -80,11 +80,15 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   loop_huber_k_ = declare_parameter<double>("pose_graph.loop_huber_k", 1.345);
   adaptive_loop_noise_ = declare_parameter<bool>("pose_graph.adaptive_loop_noise", true);
 
-  use_gps_altitude_ = declare_parameter<bool>("gps_altitude.enable", false);
-  gps_time_tolerance_ = declare_parameter<double>("gps_altitude.time_tolerance", 0.2);
-  gps_xy_variance_ = declare_parameter<double>("gps_altitude.xy_variance", 1e8);
-  gps_z_variance_ = declare_parameter<double>("gps_altitude.z_variance", 4.0);
-  gps_huber_k_ = declare_parameter<double>("gps_altitude.huber_k", 1.345);
+  kiss_matcher_slam::GpsAltitudeConfig gps_config;
+  gps_config.enabled = declare_parameter<bool>("gps_altitude.enable", false);
+  gps_config.time_tolerance_s =
+      declare_parameter<double>("gps_altitude.time_tolerance", 0.2);
+  gps_config.xy_variance = declare_parameter<double>("gps_altitude.xy_variance", 1e8);
+  gps_config.z_variance = declare_parameter<double>("gps_altitude.z_variance", 4.0);
+  gps_config.huber_k = declare_parameter<double>("gps_altitude.huber_k", 1.345);
+  gps_altitude_manager_ =
+      std::make_unique<kiss_matcher_slam::GpsAltitudeManager>(gps_config);
 
   save_map_bag_         = declare_parameter<bool>("result.save_map_bag", false);
   save_map_pcd_         = declare_parameter<bool>("result.save_map_pcd", false);
@@ -144,7 +148,7 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
 
   sub_save_flag_ = this->create_subscription<std_msgs::msg::String>(
       "save_dir", 1, std::bind(&PoseGraphManager::saveFlagCallback, this, std::placeholders::_1));
-  if (use_gps_altitude_) {
+  if (gps_altitude_manager_->enabled()) {
     sub_gps_ = this->create_subscription<sensor_msgs::msg::NavSatFix>(
         "gps/fix", rclcpp::SensorDataQoS(),
         std::bind(&PoseGraphManager::gpsCallback, this, std::placeholders::_1));
@@ -160,7 +164,7 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
       keyframe_selector_.config().translation_threshold_m;
   product_config.keyframe_rotation_threshold_rad =
       keyframe_selector_.config().rotation_threshold_rad;
-  product_config.gps_altitude_enabled = use_gps_altitude_;
+  product_config.gps_altitude_enabled = gps_altitude_manager_->enabled();
   product_config.save_keyframes_incrementally = save_keyframes_incrementally_;
   product_config.overwrite_existing = overwrite_existing_product_;
   map_product_writer_ =
@@ -231,8 +235,7 @@ void PoseGraphManager::gpsCallback(const sensor_msgs::msg::NavSatFix::ConstShare
       !std::isfinite(msg->altitude)) {
     return;
   }
-  std::lock_guard<std::mutex> lock(gps_mutex_);
-  latest_gps_ = msg;
+  gps_altitude_manager_->update(rclcpp::Time(msg->header.stamp).seconds(), msg->altitude);
 }
 
 void PoseGraphManager::saveKeyframeIncrementally(const PoseGraphNode &node) {
@@ -301,27 +304,16 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
                                       pose_to,
                                       odom_variances_);
 
-      if (use_gps_altitude_) {
-        sensor_msgs::msg::NavSatFix::ConstSharedPtr gps;
-        {
-          std::lock_guard<std::mutex> gps_lock(gps_mutex_);
-          gps = latest_gps_;
-        }
-        if (gps) {
-          const double gps_stamp = rclcpp::Time(gps->header.stamp).seconds();
-          if (std::abs(gps_stamp - current_frame_.timestamp_) <= gps_time_tolerance_) {
-            if (!gps_origin_initialized_) {
-              gps_altitude_origin_ = gps->altitude - pose_to.z();
-              gps_origin_initialized_ = true;
-            }
-            gtsam::Vector3 gps_variances;
-            gps_variances << gps_xy_variance_, gps_xy_variance_, gps_z_variance_;
-            const gtsam::Point3 measurement(
-                pose_to.x(), pose_to.y(), gps->altitude - gps_altitude_origin_);
-            pose_graph_backend_.addGps(
-                latest_keyframe_idx, measurement, gps_variances, gps_huber_k_);
-          }
-        }
+      const auto gps_constraint =
+          gps_altitude_manager_->constraint(current_frame_.timestamp_, current_frame_.pose_corrected_);
+      if (gps_constraint) {
+        pose_graph_backend_.addGps(
+            latest_keyframe_idx,
+            gtsam::Point3(gps_constraint->position.x(),
+                          gps_constraint->position.y(),
+                          gps_constraint->position.z()),
+            gps_constraint->variances,
+            gps_constraint->huber_k);
       }
 
       ++latest_keyframe_idx;

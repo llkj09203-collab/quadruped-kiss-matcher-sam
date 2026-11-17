@@ -49,6 +49,7 @@
 #include <gtsam/nonlinear/Values.h>
 
 #include "../tictoc.hpp"
+#include "kiss_matcher_slam/core/gps_altitude_manager.hpp"
 #include "kiss_matcher_slam/core/keyframe_selector.hpp"
 #include "kiss_matcher_slam/core/map_database.hpp"
 #include "kiss_matcher_slam/core/map_product_writer.hpp"
@@ -109,13 +110,13 @@ class PoseGraphManager : public rclcpp::Node {
   std::string output_directory_;
 
   std::mutex lc_mutex_;
-  std::mutex gps_mutex_;
 
   kiss_matcher::PoseGraphNode current_frame_;
   kiss_matcher_slam::MapDatabase map_database_;
   std::unique_ptr<kiss_matcher_slam::MapProductWriter> map_product_writer_;
   kiss_matcher_slam::RealtimePoseTracker realtime_pose_tracker_;
   kiss_matcher_slam::VisualizationState visualization_state_;
+  std::unique_ptr<kiss_matcher_slam::GpsAltitudeManager> gps_altitude_manager_;
 
   std::atomic<bool> is_initialized_{false};
   std::atomic<bool> need_map_update_{false};
@@ -137,15 +138,6 @@ class PoseGraphManager : public rclcpp::Node {
   std::vector<double> loop_variances_;
   double loop_huber_k_ = 1.345;
   bool adaptive_loop_noise_ = true;
-
-  bool use_gps_altitude_ = false;
-  double gps_time_tolerance_ = 0.2;
-  double gps_xy_variance_ = 1e8;
-  double gps_z_variance_ = 4.0;
-  double gps_huber_k_ = 1.345;
-  bool gps_origin_initialized_ = false;
-  double gps_altitude_origin_ = 0.0;
-  sensor_msgs::msg::NavSatFix::ConstSharedPtr latest_gps_;
 
   size_t succeeded_query_idx_ = 0;
   // pose_graph_tools_msgs::msg::PoseGraph loop_msgs_;
