@@ -66,6 +66,15 @@ TEST(ScanContextLoopDetector, FindsOldMatchingPlaceAndReportsYaw) {
   EXPECT_NEAR(result->descriptor_distance, 0.0, 1e-6);
   EXPECT_NEAR(result->yaw_offset_rad, -kPi / 2.0, 1e-6);
   EXPECT_EQ(detector.descriptorCount(), 3U);
+  const auto &stats = detector.lastStats();
+  EXPECT_EQ(stats.history_size, 3U);
+  EXPECT_EQ(stats.descriptors_built, 3U);
+  EXPECT_EQ(stats.eligible_candidates, 1U);
+  EXPECT_EQ(stats.shortlisted_candidates, 1U);
+  EXPECT_EQ(stats.full_descriptor_comparisons, 1U);
+  EXPECT_GE(stats.descriptor_build_ms, 0.0);
+  EXPECT_GE(stats.retrieval_ms, 0.0);
+  EXPECT_GE(stats.total_ms, stats.retrieval_ms);
 }
 
 TEST(ScanContextLoopDetector, HonorsRecentAndTimeExclusions) {

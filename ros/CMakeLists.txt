@@ -155,12 +155,17 @@ target_link_libraries(inter_frame_alignment
   gtsam
 )
 
+add_executable(scan_context_benchmark src/tools/scan_context_benchmark.cpp)
+target_include_directories(scan_context_benchmark PUBLIC include ${PCL_INCLUDE_DIRS})
+target_link_libraries(scan_context_benchmark kiss_matcher_slam_core ${PCL_LIBRARIES})
+
 install(TARGETS
   kiss_matcher_slam_core
   registration_visualizer
   run_kiss_matcher
   kiss_matcher_sam
   inter_frame_alignment
+  scan_context_benchmark
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

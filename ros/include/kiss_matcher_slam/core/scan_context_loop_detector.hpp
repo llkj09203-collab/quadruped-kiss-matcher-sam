@@ -21,6 +21,17 @@ struct ScanContextConfig {
   double minimum_time_separation_s = 30.0;
 };
 
+struct ScanContextDetectionStats {
+  std::size_t history_size = 0;
+  std::size_t descriptors_built = 0;
+  std::size_t eligible_candidates = 0;
+  std::size_t shortlisted_candidates = 0;
+  std::size_t full_descriptor_comparisons = 0;
+  double descriptor_build_ms = 0.0;
+  double retrieval_ms = 0.0;
+  double total_ms = 0.0;
+};
+
 // Stateful Scan Context place detector. Descriptor generation, storage and
 // retrieval intentionally stay together because they share one configuration
 // and one keyframe-indexed lifetime.
@@ -32,6 +43,7 @@ class ScanContextLoopDetector {
                                        const std::vector<Keyframe> &keyframes);
   std::size_t descriptorCount() const noexcept { return descriptors_.size(); }
   const ScanContextConfig &config() const noexcept { return config_; }
+  const ScanContextDetectionStats &lastStats() const noexcept { return last_stats_; }
 
  private:
   struct DistanceResult {
@@ -48,6 +60,7 @@ class ScanContextLoopDetector {
   ScanContextConfig config_;
   std::vector<Eigen::MatrixXf> descriptors_;
   std::vector<Eigen::VectorXf> ring_keys_;
+  ScanContextDetectionStats last_stats_;
 };
 
 }  // namespace kiss_matcher_slam

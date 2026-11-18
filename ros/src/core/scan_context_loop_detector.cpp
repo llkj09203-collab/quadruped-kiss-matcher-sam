@@ -1,6 +1,7 @@
 #include "kiss_matcher_slam/core/scan_context_loop_detector.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -85,13 +86,26 @@ void ScanContextLoopDetector::appendMissingDescriptors(
 
 std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
     const Keyframe &query, const std::vector<Keyframe> &keyframes) {
+  using Clock = std::chrono::steady_clock;
+  const auto total_start = Clock::now();
+  last_stats_ = {};
+  last_stats_.history_size = keyframes.size();
   if (keyframes.empty()) return std::nullopt;
+  const auto descriptor_count_before = descriptors_.size();
+  const auto descriptor_start = Clock::now();
   appendMissingDescriptors(keyframes);
+  last_stats_.descriptor_build_ms =
+      std::chrono::duration<double, std::milli>(Clock::now() - descriptor_start).count();
+  last_stats_.descriptors_built = descriptors_.size() - descriptor_count_before;
 
   if (query.id >= descriptors_.size() || query.id >= keyframes.size() ||
       query.id <= static_cast<std::size_t>(config_.exclude_recent)) {
+    last_stats_.total_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - total_start).count();
     return std::nullopt;
   }
+
+  const auto retrieval_start = Clock::now();
 
   struct Candidate {
     std::size_t id;
@@ -103,10 +117,18 @@ std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
     if (query.timestamp - keyframes[id].timestamp < config_.minimum_time_separation_s) continue;
     candidates.push_back({id, (ring_keys_[query.id] - ring_keys_[id]).norm()});
   }
-  if (candidates.empty()) return std::nullopt;
+  last_stats_.eligible_candidates = candidates.size();
+  if (candidates.empty()) {
+    last_stats_.retrieval_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - retrieval_start).count();
+    last_stats_.total_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - total_start).count();
+    return std::nullopt;
+  }
 
   const std::size_t candidate_count =
       std::min(candidates.size(), static_cast<std::size_t>(config_.num_candidates));
+  last_stats_.shortlisted_candidates = candidate_count;
   std::partial_sort(candidates.begin(),
                     candidates.begin() + candidate_count,
                     candidates.end(),
@@ -116,6 +138,7 @@ std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
 
   PlaceCandidate best;
   for (std::size_t i = 0; i < candidate_count; ++i) {
+    ++last_stats_.full_descriptor_comparisons;
     const auto result = descriptorDistance(descriptors_[query.id], descriptors_[candidates[i].id]);
     if (result.distance < best.descriptor_distance) {
       best.keyframe_id = candidates[i].id;
@@ -126,6 +149,10 @@ std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
     }
   }
 
+  last_stats_.retrieval_ms =
+      std::chrono::duration<double, std::milli>(Clock::now() - retrieval_start).count();
+  last_stats_.total_ms =
+      std::chrono::duration<double, std::milli>(Clock::now() - total_start).count();
   if (best.descriptor_distance >= config_.distance_threshold) return std::nullopt;
   return best;
 }
