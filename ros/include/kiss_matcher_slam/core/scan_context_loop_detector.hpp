@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -10,6 +11,8 @@
 #include "kiss_matcher_slam/core/results.hpp"
 
 namespace kiss_matcher_slam {
+
+class RingKeySearchIndex;
 
 struct ScanContextConfig {
   int num_rings = 20;
@@ -26,6 +29,7 @@ struct ScanContextDetectionStats {
   std::size_t history_size = 0;
   std::size_t descriptors_built = 0;
   std::size_t eligible_candidates = 0;
+  std::size_t indexed_candidates = 0;
   std::size_t shortlisted_candidates = 0;
   std::size_t full_descriptor_comparisons = 0;
   std::size_t full_shift_evaluations = 0;
@@ -40,6 +44,7 @@ struct ScanContextDetectionStats {
 class ScanContextLoopDetector {
  public:
   explicit ScanContextLoopDetector(ScanContextConfig config);
+  ~ScanContextLoopDetector();
 
   std::optional<PlaceCandidate> detect(const Keyframe &query,
                                        const std::vector<Keyframe> &keyframes);
@@ -68,6 +73,7 @@ class ScanContextLoopDetector {
   std::vector<Eigen::MatrixXf> descriptors_;
   std::vector<Eigen::VectorXf> ring_keys_;
   std::vector<Eigen::VectorXf> sector_keys_;
+  std::unique_ptr<RingKeySearchIndex> ring_key_index_;
   ScanContextDetectionStats last_stats_;
 };
 

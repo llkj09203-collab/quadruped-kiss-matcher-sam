@@ -70,8 +70,8 @@ int main(int argc, char **argv) {
 
     std::ofstream output(output_path);
     if (!output) throw std::runtime_error("cannot create output file: " + output_path.string());
-    output << "query_id,match_id,distance,yaw_rad,eligible,shortlisted,comparisons,shift_evaluations,"
-              "descriptor_ms,retrieval_ms,total_ms\n";
+    output << "query_id,match_id,distance,yaw_rad,eligible,indexed,shortlisted,comparisons,"
+              "shift_evaluations,descriptor_ms,retrieval_ms,total_ms\n";
     output << std::fixed << std::setprecision(9);
 
     std::vector<kiss_matcher_slam::Keyframe> history;
@@ -99,10 +99,10 @@ int main(int argc, char **argv) {
       } else {
         output << "-1,nan,nan";
       }
-      output << ',' << stats.eligible_candidates << ',' << stats.shortlisted_candidates << ','
-             << stats.full_descriptor_comparisons << ',' << stats.full_shift_evaluations << ','
-             << stats.descriptor_build_ms << ',' << stats.retrieval_ms << ',' << stats.total_ms
-             << '\n';
+      output << ',' << stats.eligible_candidates << ',' << stats.indexed_candidates << ','
+             << stats.shortlisted_candidates << ',' << stats.full_descriptor_comparisons << ','
+             << stats.full_shift_evaluations << ',' << stats.descriptor_build_ms << ','
+             << stats.retrieval_ms << ',' << stats.total_ms << '\n';
     }
 
     const double mean = std::accumulate(retrieval_times.begin(), retrieval_times.end(), 0.0) /

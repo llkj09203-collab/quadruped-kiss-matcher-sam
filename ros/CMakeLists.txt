@@ -88,7 +88,7 @@ add_library(kiss_matcher_slam_core
   src/core/visualization_state.cpp
 )
 target_include_directories(kiss_matcher_slam_core PUBLIC include ${PCL_INCLUDE_DIRS})
-target_link_libraries(kiss_matcher_slam_core ${PCL_LIBRARIES} gtsam)
+target_link_libraries(kiss_matcher_slam_core kiss_matcher::kiss_matcher_core ${PCL_LIBRARIES} gtsam)
 
 ################################################################################
 add_executable(run_kiss_matcher src/run_kiss_matcher.cpp)

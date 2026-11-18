@@ -84,3 +84,34 @@ Those five changes are an expected consequence of replacing global exhaustive
 yaw search with the reference coarse-to-fine local search in a repetitive lab.
 They are recorded rather than hidden. Scan Context still proposes candidates;
 KISS-Matcher geometric registration remains responsible for loop acceptance.
+
+## Ring Key KD-tree result
+
+The second step replaces linear Ring Key candidate retrieval with the dynamic
+KD-tree already provided by KISS-Matcher's nanoflann dependency. Eligible Ring
+Keys are inserted incrementally, so the tree does not need a full rebuild and
+does not delay newly eligible candidates.
+
+On the 205-keyframe product, all 174 accepted results are identical to the
+Sector Key stage in candidate ID, descriptor distance and yaw. The recorded
+mean retrieval time is 0.073 ms, slightly above the 0.067 ms linear-search run.
+This small sequence is below the scale at which KD-tree asymptotic behavior is
+expected to help; a campus-scale benchmark with thousands of keyframes remains
+required. The implementation favors exact candidate semantics over periodic
+tree rebuilds that temporarily omit newly eligible history.
+
+## Full pipeline regression
+
+The completed Sector Key and dynamic Ring Key KD-tree implementation was
+replayed through FAST-LIO and KISS-SAM using the 214-second laboratory bag. The
+validated session `scan_context_dynamic_20261118_r4` produced:
+
+- 204 keyframe PCDs, timestamps and odometry poses;
+- 204 optimized poses plus the trajectory header;
+- a readable final map containing 14,067 points;
+- 40 geometrically accepted and 90 rejected loop proposals;
+- no crash, invalid numeric trajectory value or missing map product.
+
+The modular-refactor reference produced 205 keyframes and 14,079 map points.
+The one-keyframe and 12-point difference is within the documented asynchronous
+ROS timer variation; all product count and validity invariants pass.

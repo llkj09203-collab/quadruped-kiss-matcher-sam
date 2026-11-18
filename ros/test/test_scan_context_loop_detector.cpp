@@ -138,4 +138,22 @@ TEST(ScanContextLoopDetector, UsesStandardLocalSectorSearchWindow) {
   EXPECT_EQ(detector.lastStats().full_shift_evaluations, 7U);
 }
 
+TEST(ScanContextLoopDetector, IncrementallyIndexesEveryEligibleRingKey) {
+  auto config = testConfig();
+  config.exclude_recent = 1;
+  config.minimum_time_separation_s = 0.0;
+  kiss_matcher_slam::ScanContextLoopDetector detector(config);
+  std::vector<kiss_matcher_slam::Keyframe> keyframes{
+      makePattern(0, 0.0), makePattern(1, 1.0), makePattern(2, 2.0)};
+
+  detector.detect(keyframes.back(), keyframes);
+  EXPECT_EQ(detector.lastStats().eligible_candidates, 1U);
+  EXPECT_EQ(detector.lastStats().indexed_candidates, 1U);
+
+  keyframes.push_back(makePattern(3, 3.0));
+  detector.detect(keyframes.back(), keyframes);
+  EXPECT_EQ(detector.lastStats().eligible_candidates, 2U);
+  EXPECT_EQ(detector.lastStats().indexed_candidates, 2U);
+}
+
 }  // namespace

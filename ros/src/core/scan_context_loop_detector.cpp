@@ -7,10 +7,83 @@
 #include <stdexcept>
 #include <utility>
 
+#include <kiss_matcher/kdtree/nanoflann.hpp>
+
 namespace kiss_matcher_slam {
 namespace {
 constexpr double kTwoPi = 6.28318530717958647692;
 }
+
+class RingKeyDataset {
+ public:
+  RingKeyDataset(const std::vector<Eigen::VectorXf> &ring_keys,
+                 std::vector<std::size_t> keyframe_ids)
+      : ring_keys_(ring_keys), keyframe_ids_(std::move(keyframe_ids)) {}
+
+  std::size_t kdtree_get_point_count() const { return keyframe_ids_.size(); }
+  float kdtree_get_pt(const std::size_t index, const std::size_t dimension) const {
+    return ring_keys_[keyframe_ids_[index]](static_cast<Eigen::Index>(dimension));
+  }
+  template <class BoundingBox>
+  bool kdtree_get_bbox(BoundingBox &) const {
+    return false;
+  }
+  std::size_t keyframeId(const std::size_t index) const { return keyframe_ids_[index]; }
+  const std::vector<std::size_t> &keyframeIds() const { return keyframe_ids_; }
+  void append(const std::vector<std::size_t> &keyframe_ids, const std::size_t begin) {
+    keyframe_ids_.insert(keyframe_ids_.end(), keyframe_ids.begin() + begin, keyframe_ids.end());
+  }
+
+ private:
+  const std::vector<Eigen::VectorXf> &ring_keys_;
+  std::vector<std::size_t> keyframe_ids_;
+};
+
+using RingKeyDistance = kiss_matcher::L2_Simple_Adaptor<float, RingKeyDataset, float>;
+using RingKeyTree =
+    kiss_matcher::KDTreeSingleIndexDynamicAdaptor<RingKeyDistance, RingKeyDataset, -1, std::size_t>;
+
+class RingKeySearchIndex {
+ public:
+  RingKeySearchIndex(const std::vector<Eigen::VectorXf> &ring_keys,
+                     std::vector<std::size_t> keyframe_ids,
+                     const int dimensions)
+      : dataset_(ring_keys, std::move(keyframe_ids)),
+        tree_(dimensions, dataset_, kiss_matcher::KDTreeSingleIndexAdaptorParams(10)) {
+  }
+
+  void synchronize(const std::vector<std::size_t> &keyframe_ids) {
+    const auto &indexed_ids = dataset_.keyframeIds();
+    if (keyframe_ids.size() < indexed_ids.size() ||
+        !std::equal(indexed_ids.begin(), indexed_ids.end(), keyframe_ids.begin())) {
+      throw std::invalid_argument("Scan Context eligible Ring Key history changed unexpectedly");
+    }
+    if (keyframe_ids.size() == indexed_ids.size()) return;
+    const std::size_t first_new = indexed_ids.size();
+    dataset_.append(keyframe_ids, first_new);
+    tree_.addPoints(first_new, keyframe_ids.size() - 1);
+  }
+
+  std::size_t size() const { return dataset_.keyframeIds().size(); }
+
+  std::vector<std::size_t> nearest(const Eigen::VectorXf &query, const std::size_t count) const {
+    std::vector<std::size_t> indices(count);
+    std::vector<float> squared_distances(count);
+    kiss_matcher::KNNResultSet<float, std::size_t> result(count);
+    result.init(indices.data(), squared_distances.data());
+    tree_.findNeighbors(result, query.data(), kiss_matcher::SearchParams());
+    const std::size_t found = result.size();
+    if (found != count) {
+      throw std::runtime_error("Scan Context Ring Key KD-tree returned too few candidates");
+    }
+    for (auto &index : indices) index = dataset_.keyframeId(index);
+    return indices;
+  }
+
+ private:
+  RingKeyDataset dataset_;
+  RingKeyTree tree_;
+};
 
 ScanContextLoopDetector::ScanContextLoopDetector(ScanContextConfig config)
     : config_(std::move(config)) {
@@ -25,6 +98,8 @@ ScanContextLoopDetector::ScanContextLoopDetector(ScanContextConfig config)
     throw std::invalid_argument("invalid Scan Context configuration");
   }
 }
+
+ScanContextLoopDetector::~ScanContextLoopDetector() = default;
 
 Eigen::MatrixXf ScanContextLoopDetector::makeDescriptor(
     const pcl::PointCloud<SlamPoint> &cloud) const {
@@ -152,18 +227,14 @@ std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
 
   const auto retrieval_start = Clock::now();
 
-  struct Candidate {
-    std::size_t id;
-    double ring_distance;
-  };
-  std::vector<Candidate> candidates;
+  std::vector<std::size_t> eligible_ids;
   const std::size_t search_end = query.id - static_cast<std::size_t>(config_.exclude_recent);
   for (std::size_t id = 0; id < search_end; ++id) {
     if (query.timestamp - keyframes[id].timestamp < config_.minimum_time_separation_s) continue;
-    candidates.push_back({id, (ring_keys_[query.id] - ring_keys_[id]).norm()});
+    eligible_ids.push_back(id);
   }
-  last_stats_.eligible_candidates = candidates.size();
-  if (candidates.empty()) {
+  last_stats_.eligible_candidates = eligible_ids.size();
+  if (eligible_ids.empty()) {
     last_stats_.retrieval_ms =
         std::chrono::duration<double, std::milli>(Clock::now() - retrieval_start).count();
     last_stats_.total_ms =
@@ -171,20 +242,23 @@ std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
     return std::nullopt;
   }
 
-  const std::size_t candidate_count =
-      std::min(candidates.size(), static_cast<std::size_t>(config_.num_candidates));
-  last_stats_.shortlisted_candidates = candidate_count;
-  std::partial_sort(candidates.begin(),
-                    candidates.begin() + candidate_count,
-                    candidates.end(),
-                    [](const Candidate &lhs, const Candidate &rhs) {
-                      return lhs.ring_distance < rhs.ring_distance;
-                    });
+  if (!ring_key_index_) {
+    ring_key_index_ = std::make_unique<RingKeySearchIndex>(
+        ring_keys_, eligible_ids, config_.num_rings);
+  } else {
+    ring_key_index_->synchronize(eligible_ids);
+  }
+  last_stats_.indexed_candidates = ring_key_index_->size();
+  const std::size_t indexed_candidate_count =
+      std::min(ring_key_index_->size(), static_cast<std::size_t>(config_.num_candidates));
+  last_stats_.shortlisted_candidates = indexed_candidate_count;
+  const auto candidate_ids =
+      ring_key_index_->nearest(ring_keys_[query.id], indexed_candidate_count);
 
   PlaceCandidate best;
-  for (std::size_t i = 0; i < candidate_count; ++i) {
+  for (std::size_t i = 0; i < indexed_candidate_count; ++i) {
     ++last_stats_.full_descriptor_comparisons;
-    const auto candidate_id = candidates[i].id;
+    const auto candidate_id = candidate_ids[i];
     const int coarse_shift =
         fastAlignUsingSectorKey(sector_keys_[query.id], sector_keys_[candidate_id]);
     const auto result = descriptorDistance(descriptors_[query.id],
@@ -192,7 +266,7 @@ std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
                                            coarse_shift,
                                            last_stats_.full_shift_evaluations);
     if (result.distance < best.descriptor_distance) {
-      best.keyframe_id = candidates[i].id;
+      best.keyframe_id = candidate_id;
       best.descriptor_distance = result.distance;
       int signed_shift = result.sector_shift;
       if (signed_shift > config_.num_sectors / 2) signed_shift -= config_.num_sectors;
