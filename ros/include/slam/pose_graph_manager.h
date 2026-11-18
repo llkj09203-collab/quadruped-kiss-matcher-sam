@@ -3,15 +3,10 @@
 #ifndef KISS_MATCHER_POSE_GRAPH_MANAGER_H
 #define KISS_MATCHER_POSE_GRAPH_MANAGER_H
 
-#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <ctime>
-#include <deque>
-#include <iostream>
 #include <memory>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -33,13 +28,7 @@
 #include "message_filters/sync_policies/approximate_time.h"
 #include "message_filters/synchronizer.h"
 
-// TF2
-#include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
-#include <tf2_ros/transform_listener.h>
-// #include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
-// #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-// #include <tf2_eigen/tf2_eigen.hpp>
 
 #include <gtsam/geometry/Point3.h>
 #include <gtsam/geometry/Pose3.h>
@@ -65,12 +54,9 @@
 #include "slam/pose_graph_node.hpp"
 #include "slam/utils.hpp"
 
-// #include <pose_graph_tools_msgs/msg/pose_graph.hpp>
-
-using namespace std::chrono;
-typedef message_filters::sync_policies::ApproximateTime<nav_msgs::msg::Odometry,
-                                                        sensor_msgs::msg::PointCloud2>
-    NodeSyncPolicy;
+using NodeSyncPolicy =
+    message_filters::sync_policies::ApproximateTime<nav_msgs::msg::Odometry,
+                                                    sensor_msgs::msg::PointCloud2>;
 
 class PoseGraphManager : public rclcpp::Node {
  public:
@@ -83,8 +69,6 @@ class PoseGraphManager : public rclcpp::Node {
 
   void callbackNode(const nav_msgs::msg::Odometry::ConstSharedPtr &odom_msg,
                     const sensor_msgs::msg::PointCloud2::ConstSharedPtr &scan_msg);
-  /**** Timer functions ****/
-  // void loopPubTimerFunc();
   void buildMap();
   void detectLoopClosureByScanContext();
   void detectLoopClosureByNNSearch();
@@ -131,30 +115,21 @@ class PoseGraphManager : public rclcpp::Node {
   double scan_voxel_res_;
   double map_voxel_res_;
   double save_voxel_res_;
-  double loop_pub_delayed_time_;
   double loop_detection_radius_;  // Only for visualization
-  int sub_key_num_;
 
-  // pose_graph_tools_msgs::msg::PoseGraph loop_msgs_;
   kiss_matcher_slam::LoopCandidateQueue loop_candidate_queue_;
-
-  kiss_matcher::TicToc timer_;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
   bool store_voxelized_scan_ = false;
 
-  bool save_map_bag_         = false;
   bool save_map_pcd_         = false;
   bool save_in_kitti_format_ = false;
   bool save_keyframes_incrementally_ = false;
   bool overwrite_existing_product_ = false;
-  double last_lc_time_       = 0.0;
 
   std::shared_ptr<kiss_matcher::LoopClosure> loop_closure_;
 
-  // NOTE(hlim): We do not provide a loop detector implementation directly,
-  // but you can plug in your own detector via this interface.
   bool scan_context_enabled_ = true;
   bool scan_context_verbose_ = false;
   std::unique_ptr<kiss_matcher_slam::ScanContextLoopDetector> scan_context_detector_;
@@ -178,15 +153,12 @@ class PoseGraphManager : public rclcpp::Node {
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_save_flag_;
   rclcpp::Subscription<sensor_msgs::msg::NavSatFix>::SharedPtr sub_gps_;
 
-  // rclcpp::Publisher<pose_graph_tools_msgs::msg::PoseGraph>::SharedPtr loop_closures_pub_;
-
   // message_filters
   std::shared_ptr<message_filters::Subscriber<nav_msgs::msg::Odometry>> sub_odom_;
   std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::PointCloud2>> sub_scan_;
   std::shared_ptr<message_filters::Synchronizer<NodeSyncPolicy>> sub_node_;
 
   // Timers
-  rclcpp::TimerBase::SharedPtr hydra_loop_timer_;
   rclcpp::TimerBase::SharedPtr map_timer_;
   rclcpp::TimerBase::SharedPtr scan_context_timer_;
   rclcpp::TimerBase::SharedPtr loop_nnsearch_timer_;

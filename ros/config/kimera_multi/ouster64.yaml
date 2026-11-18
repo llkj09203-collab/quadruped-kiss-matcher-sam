@@ -5,10 +5,8 @@
 # =====================================================================================
 /**:
   ros__parameters:
-    loop_pub_hz: 0.1                 # Frequency to publish loop closures (Hz)
     loop_detector_hz: 2.0            # Scan Context query frequency (Hz); name kept for compatibility
     loop_nnsearch_hz: 2.0            # Frequency to update loop by nearest neighbor search (Hz)
-    loop_pub_delayed_time: 30.0      # Delay before publishing loop closure results (sec)
     map_update_hz: 0.2               # Frequency to update the map (Hz)
     vis_hz: 1.0                      # Visualization update frequency (Hz)
 
@@ -60,6 +58,5 @@
 
     result:
       save_map_pcd: false
-      save_map_bag: false
       save_in_kitti_format: false
       seq_name: "sequence"

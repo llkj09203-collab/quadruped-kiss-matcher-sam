@@ -6,7 +6,6 @@ using namespace kiss_matcher;
 
 PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
     : rclcpp::Node("km_sam", options) {
-  double loop_pub_hz;
   double loop_detector_hz;
   double loop_nnsearch_hz;
   bool enable_loop_nnsearch;
@@ -19,11 +18,9 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
 
   map_frame_             = declare_parameter<std::string>("map_frame", "map");
   base_frame_            = declare_parameter<std::string>("base_frame", "base");
-  loop_pub_hz            = declare_parameter<double>("loop_pub_hz", 0.1);
   loop_detector_hz       = declare_parameter<double>("loop_detector_hz", 1.0);
   loop_nnsearch_hz       = declare_parameter<double>("loop_nnsearch_hz", 1.0);
   enable_loop_nnsearch   = declare_parameter<bool>("loop.enable_nnsearch", false);
-  loop_pub_delayed_time_ = declare_parameter<double>("loop_pub_delayed_time", 60.0);
   map_update_hz          = declare_parameter<double>("map_update_hz", 0.2);
   vis_hz                 = declare_parameter<double>("vis_hz", 0.5);
 
@@ -108,7 +105,6 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
       *gps_altitude_manager_,
       runtime_state_);
 
-  save_map_bag_         = declare_parameter<bool>("result.save_map_bag", false);
   save_map_pcd_         = declare_parameter<bool>("result.save_map_pcd", false);
   save_in_kitti_format_ = declare_parameter<bool>("result.save_in_kitti_format", false);
   seq_name_             = declare_parameter<std::string>("result.seq_name", "sequence");
@@ -147,9 +143,6 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   loop_detection_radius_pub_ =
       this->create_publisher<visualization_msgs::msg::Marker>("loop_detection_radius", qos);
 
-  // loop_closures_pub_ =
-  // this->create_publisher<pose_graph_tools_msgs::msg::PoseGraph>("/hydra_ros_node/external_loop_closures",
-  // 10);
   realtime_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseStamped>("pose_stamped", qos);
   optimized_odom_pub_ =
       this->create_publisher<nav_msgs::msg::Odometry>("odometry/optimized", qos);
@@ -195,10 +188,6 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
       std::make_unique<kiss_matcher_slam::MapProductWriter>(std::move(product_config));
   map_product_writer_->initialize();
 
-  // hydra_loop_timer_ = this->create_wall_timer(
-  //   std::chrono::duration<double>(1.0 / loop_pub_hz),
-  //   std::bind(&PoseGraphManager::loopPubTimerFunc, this));
-
   kiss_matcher_slam::IncrementalMapBuilderConfig map_builder_config;
   map_builder_config.scan_voxel_resolution = scan_voxel_res_;
   map_builder_config.map_voxel_resolution = map_voxel_res_;
@@ -242,9 +231,6 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
 }
 
 PoseGraphManager::~PoseGraphManager() {
-  if (save_map_bag_) {
-    RCLCPP_INFO(this->get_logger(), "NOTE(hlim): skipping final bag save in ROS2 example code.");
-  }
   const auto keyframes = map_database_.snapshot();
   if (save_map_pcd_ && !keyframes.empty()) {
     try {
@@ -326,22 +312,6 @@ void PoseGraphManager::callbackNode(const nav_msgs::msg::Odometry::ConstSharedPt
       t_keyframe_processing,
       keyframe_result.optimization_time_ms);
 }
-
-// void PoseGraphManager::loopPubTimerFunc()
-// {
-//   if (loop_msgs_.edges.empty()) {
-//     RCLCPP_WARN(this->get_logger(),
-//       "`loop_msgs_.edges` is empty. Skipping loop closure publishing.");
-//     return;
-//   }
-//   if (last_lc_time_ + loop_pub_delayed_time_ < this->now().seconds()) {
-//     loop_closures_pub_->publish(loop_msgs_);
-//     loop_msgs_.nodes.clear();
-//     loop_msgs_.edges.clear();
-//     RCLCPP_INFO(this->get_logger(), "`loop_msgs_` is successfully published!");
-//     return;
-//   }
-// }
 
 void PoseGraphManager::buildMap() {
   if (map_pub_->get_subscription_count() > 0) {
@@ -585,10 +555,6 @@ void PoseGraphManager::saveFlagCallback(const std_msgs::msg::String::ConstShared
       RCLCPP_INFO(this->get_logger(),
                   "Scans and poses saved in PCD, KITTI and TUM format below %s",
                   directory.c_str());
-    }
-    if (save_map_bag_) {
-      RCLCPP_INFO(this->get_logger(),
-                  "NOTE(hlim): rosbag2 saving not directly implemented; skipping.");
     }
     if (save_map_pcd_) {
       const auto path = map_product_writer_->writeMap(keyframes, save_dir, false);
