@@ -46,6 +46,7 @@
       num_candidates: 10
       min_time_separation: 30.0
       distance_threshold: 0.18
+      sector_search_ratio: 0.1
 
     pose_graph:
       # GTSAM Pose3 order: rotation xyz, then translation xyz.

@@ -19,6 +19,7 @@ struct ScanContextConfig {
   double max_radius_m = 80.0;
   double distance_threshold = 0.18;
   double minimum_time_separation_s = 30.0;
+  double sector_search_ratio = 0.1;
 };
 
 struct ScanContextDetectionStats {
@@ -27,6 +28,7 @@ struct ScanContextDetectionStats {
   std::size_t eligible_candidates = 0;
   std::size_t shortlisted_candidates = 0;
   std::size_t full_descriptor_comparisons = 0;
+  std::size_t full_shift_evaluations = 0;
   double descriptor_build_ms = 0.0;
   double retrieval_ms = 0.0;
   double total_ms = 0.0;
@@ -53,13 +55,19 @@ class ScanContextLoopDetector {
 
   Eigen::MatrixXf makeDescriptor(const pcl::PointCloud<SlamPoint> &cloud) const;
   Eigen::VectorXf makeRingKey(const Eigen::MatrixXf &descriptor) const;
+  Eigen::VectorXf makeSectorKey(const Eigen::MatrixXf &descriptor) const;
+  int fastAlignUsingSectorKey(const Eigen::VectorXf &query,
+                              const Eigen::VectorXf &candidate) const;
   DistanceResult descriptorDistance(const Eigen::MatrixXf &query,
-                                    const Eigen::MatrixXf &candidate) const;
+                                    const Eigen::MatrixXf &candidate,
+                                    int coarse_shift,
+                                    std::size_t &shift_evaluations) const;
   void appendMissingDescriptors(const std::vector<Keyframe> &keyframes);
 
   ScanContextConfig config_;
   std::vector<Eigen::MatrixXf> descriptors_;
   std::vector<Eigen::VectorXf> ring_keys_;
+  std::vector<Eigen::VectorXf> sector_keys_;
   ScanContextDetectionStats last_stats_;
 };
 

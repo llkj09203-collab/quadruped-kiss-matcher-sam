@@ -64,3 +64,23 @@ The representative median-query time is approximately 0.27 ms. These numbers
 are a regression reference for this machine, not a portable real-time limit.
 The KD-tree benefit must also be evaluated on a synthetic or campus-scale map;
 205 keyframes are too few to demonstrate asymptotic improvement.
+
+## Sector Key standardization result
+
+The first standardization step adds the column-mean Sector Key. It searches all
+Sector Key circular shifts for a coarse yaw, then evaluates the full descriptor
+only inside the reference local window. With 60 sectors and search ratio 0.1,
+this reduces each shortlisted candidate from 60 to 7 full shift evaluations.
+
+On the same 205-keyframe product:
+
+- accepted descriptor candidates remain 174;
+- total full shift evaluations are 11,487 for 1,641 candidate comparisons;
+- mean retrieval time is 0.067 ms in the recorded Release run;
+- final query 204 remains match 1, distance 0.000070603, yaw 2.722713633 rad;
+- 5 of the 174 accepted queries select a different, similarly scored candidate.
+
+Those five changes are an expected consequence of replacing global exhaustive
+yaw search with the reference coarse-to-fine local search in a repetitive lab.
+They are recorded rather than hidden. Scan Context still proposes candidates;
+KISS-Matcher geometric registration remains responsible for loop acceptance.

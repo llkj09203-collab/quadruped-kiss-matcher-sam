@@ -19,7 +19,9 @@ ScanContextLoopDetector::ScanContextLoopDetector(ScanContextConfig config)
       config_.max_radius_m <= 0.0 || !std::isfinite(config_.distance_threshold) ||
       config_.distance_threshold < 0.0 || config_.distance_threshold > 1.0 ||
       !std::isfinite(config_.minimum_time_separation_s) ||
-      config_.minimum_time_separation_s < 0.0) {
+      config_.minimum_time_separation_s < 0.0 ||
+      !std::isfinite(config_.sector_search_ratio) || config_.sector_search_ratio <= 0.0 ||
+      config_.sector_search_ratio > 1.0) {
     throw std::invalid_argument("invalid Scan Context configuration");
   }
 }
@@ -49,10 +51,48 @@ Eigen::VectorXf ScanContextLoopDetector::makeRingKey(const Eigen::MatrixXf &desc
   return descriptor.rowwise().mean();
 }
 
-ScanContextLoopDetector::DistanceResult ScanContextLoopDetector::descriptorDistance(
-    const Eigen::MatrixXf &query, const Eigen::MatrixXf &candidate) const {
-  DistanceResult best;
+Eigen::VectorXf ScanContextLoopDetector::makeSectorKey(const Eigen::MatrixXf &descriptor) const {
+  return descriptor.colwise().mean().transpose();
+}
+
+int ScanContextLoopDetector::fastAlignUsingSectorKey(const Eigen::VectorXf &query,
+                                                      const Eigen::VectorXf &candidate) const {
+  int best_shift = 0;
+  double best_distance = std::numeric_limits<double>::infinity();
   for (int shift = 0; shift < config_.num_sectors; ++shift) {
+    double squared_distance = 0.0;
+    for (int sector = 0; sector < config_.num_sectors; ++sector) {
+      const double difference =
+          query(sector) - candidate((sector + shift) % config_.num_sectors);
+      squared_distance += difference * difference;
+    }
+    if (squared_distance < best_distance) {
+      best_distance = squared_distance;
+      best_shift = shift;
+    }
+  }
+  return best_shift;
+}
+
+ScanContextLoopDetector::DistanceResult ScanContextLoopDetector::descriptorDistance(
+    const Eigen::MatrixXf &query,
+    const Eigen::MatrixXf &candidate,
+    const int coarse_shift,
+    std::size_t &shift_evaluations) const {
+  DistanceResult best;
+  const int search_radius = static_cast<int>(std::round(
+      0.5 * config_.sector_search_ratio * static_cast<double>(config_.num_sectors)));
+  std::vector<int> search_shifts;
+  search_shifts.reserve(static_cast<std::size_t>(2 * search_radius + 1));
+  for (int offset = -search_radius; offset <= search_radius; ++offset) {
+    search_shifts.push_back((coarse_shift + offset + config_.num_sectors) % config_.num_sectors);
+  }
+  std::sort(search_shifts.begin(), search_shifts.end());
+  search_shifts.erase(std::unique(search_shifts.begin(), search_shifts.end()),
+                      search_shifts.end());
+
+  for (const int shift : search_shifts) {
+    ++shift_evaluations;
     double similarity_sum = 0.0;
     int valid_columns = 0;
     for (int col = 0; col < config_.num_sectors; ++col) {
@@ -80,6 +120,7 @@ void ScanContextLoopDetector::appendMissingDescriptors(
     }
     auto descriptor = makeDescriptor(keyframes[index].cloud);
     ring_keys_.push_back(makeRingKey(descriptor));
+    sector_keys_.push_back(makeSectorKey(descriptor));
     descriptors_.push_back(std::move(descriptor));
   }
 }
@@ -90,7 +131,11 @@ std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
   const auto total_start = Clock::now();
   last_stats_ = {};
   last_stats_.history_size = keyframes.size();
-  if (keyframes.empty()) return std::nullopt;
+  if (keyframes.empty()) {
+    last_stats_.total_ms =
+        std::chrono::duration<double, std::milli>(Clock::now() - total_start).count();
+    return std::nullopt;
+  }
   const auto descriptor_count_before = descriptors_.size();
   const auto descriptor_start = Clock::now();
   appendMissingDescriptors(keyframes);
@@ -139,7 +184,13 @@ std::optional<PlaceCandidate> ScanContextLoopDetector::detect(
   PlaceCandidate best;
   for (std::size_t i = 0; i < candidate_count; ++i) {
     ++last_stats_.full_descriptor_comparisons;
-    const auto result = descriptorDistance(descriptors_[query.id], descriptors_[candidates[i].id]);
+    const auto candidate_id = candidates[i].id;
+    const int coarse_shift =
+        fastAlignUsingSectorKey(sector_keys_[query.id], sector_keys_[candidate_id]);
+    const auto result = descriptorDistance(descriptors_[query.id],
+                                           descriptors_[candidate_id],
+                                           coarse_shift,
+                                           last_stats_.full_shift_evaluations);
     if (result.distance < best.descriptor_distance) {
       best.keyframe_id = candidates[i].id;
       best.descriptor_distance = result.distance;

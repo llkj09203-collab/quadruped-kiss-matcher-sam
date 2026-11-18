@@ -64,6 +64,8 @@ PoseGraphManager::PoseGraphManager(const rclcpp::NodeOptions &options)
   scan_context_config.max_radius_m = declare_parameter<double>("scan_context.max_radius", 80.0);
   scan_context_config.distance_threshold =
       declare_parameter<double>("scan_context.distance_threshold", 0.18);
+  scan_context_config.sector_search_ratio =
+      declare_parameter<double>("scan_context.sector_search_ratio", 0.1);
   scan_context_config.minimum_time_separation_s =
       declare_parameter<double>("scan_context.min_time_separation", 30.0);
 

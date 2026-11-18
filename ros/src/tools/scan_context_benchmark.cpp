@@ -64,12 +64,13 @@ int main(int argc, char **argv) {
     config.num_candidates = 10;
     config.max_radius_m = 80.0;
     config.distance_threshold = 0.18;
+    config.sector_search_ratio = 0.1;
     config.minimum_time_separation_s = 30.0;
     kiss_matcher_slam::ScanContextLoopDetector detector(config);
 
     std::ofstream output(output_path);
     if (!output) throw std::runtime_error("cannot create output file: " + output_path.string());
-    output << "query_id,match_id,distance,yaw_rad,eligible,shortlisted,comparisons,"
+    output << "query_id,match_id,distance,yaw_rad,eligible,shortlisted,comparisons,shift_evaluations,"
               "descriptor_ms,retrieval_ms,total_ms\n";
     output << std::fixed << std::setprecision(9);
 
@@ -99,8 +100,9 @@ int main(int argc, char **argv) {
         output << "-1,nan,nan";
       }
       output << ',' << stats.eligible_candidates << ',' << stats.shortlisted_candidates << ','
-             << stats.full_descriptor_comparisons << ',' << stats.descriptor_build_ms << ','
-             << stats.retrieval_ms << ',' << stats.total_ms << '\n';
+             << stats.full_descriptor_comparisons << ',' << stats.full_shift_evaluations << ','
+             << stats.descriptor_build_ms << ',' << stats.retrieval_ms << ',' << stats.total_ms
+             << '\n';
     }
 
     const double mean = std::accumulate(retrieval_times.begin(), retrieval_times.end(), 0.0) /

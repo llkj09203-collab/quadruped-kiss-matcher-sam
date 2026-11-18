@@ -38,6 +38,7 @@ kiss_matcher_slam::ScanContextConfig testConfig() {
   config.max_radius_m = 10.0;
   config.distance_threshold = 0.1;
   config.minimum_time_separation_s = 20.0;
+  config.sector_search_ratio = 0.1;
   return config;
 }
 
@@ -50,6 +51,12 @@ TEST(ScanContextLoopDetector, RejectsInvalidConfiguration) {
   EXPECT_THROW(kiss_matcher_slam::ScanContextLoopDetector{config}, std::invalid_argument);
   config = testConfig();
   config.minimum_time_separation_s = -1.0;
+  EXPECT_THROW(kiss_matcher_slam::ScanContextLoopDetector{config}, std::invalid_argument);
+  config = testConfig();
+  config.sector_search_ratio = 0.0;
+  EXPECT_THROW(kiss_matcher_slam::ScanContextLoopDetector{config}, std::invalid_argument);
+  config = testConfig();
+  config.sector_search_ratio = 1.1;
   EXPECT_THROW(kiss_matcher_slam::ScanContextLoopDetector{config}, std::invalid_argument);
 }
 
@@ -72,6 +79,10 @@ TEST(ScanContextLoopDetector, FindsOldMatchingPlaceAndReportsYaw) {
   EXPECT_EQ(stats.eligible_candidates, 1U);
   EXPECT_EQ(stats.shortlisted_candidates, 1U);
   EXPECT_EQ(stats.full_descriptor_comparisons, 1U);
+  EXPECT_GT(stats.full_shift_evaluations, 0U);
+  EXPECT_LT(
+      stats.full_shift_evaluations,
+      stats.full_descriptor_comparisons * static_cast<std::size_t>(detector.config().num_sectors));
   EXPECT_GE(stats.descriptor_build_ms, 0.0);
   EXPECT_GE(stats.retrieval_ms, 0.0);
   EXPECT_GE(stats.total_ms, stats.retrieval_ms);
@@ -106,6 +117,25 @@ TEST(ScanContextLoopDetector, AppendsDescriptorsIncrementally) {
   keyframes.push_back(makePattern(1, 10.0));
   detector.detect(keyframes.back(), keyframes);
   EXPECT_EQ(detector.descriptorCount(), 2U);
+}
+
+TEST(ScanContextLoopDetector, UsesStandardLocalSectorSearchWindow) {
+  auto config = testConfig();
+  config.num_sectors = 60;
+  config.exclude_recent = 1;
+  config.num_candidates = 1;
+  config.minimum_time_separation_s = 0.0;
+  config.sector_search_ratio = 0.1;
+  kiss_matcher_slam::ScanContextLoopDetector detector(config);
+
+  std::vector<kiss_matcher_slam::Keyframe> keyframes{
+      makePattern(0, 0.0), makePattern(1, 1.0, kPi), makePattern(2, 2.0, kPi / 2.0)};
+  const auto result = detector.detect(keyframes.back(), keyframes);
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result->keyframe_id, 0U);
+  EXPECT_EQ(detector.lastStats().full_descriptor_comparisons, 1U);
+  EXPECT_EQ(detector.lastStats().full_shift_evaluations, 7U);
 }
 
 }  // namespace
