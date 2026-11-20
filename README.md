@@ -24,6 +24,21 @@
 
 ______________________________________________________________________
 
+## Project provenance
+
+This repository is an independently maintained derivative used by a quadruped
+robot SLAM project. It is **not an official MIT-SPARK release**.
+
+- Upstream project: [MIT-SPARK/KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher)
+- Local work includes a modularized ROS 2 SLAM back end, standardized Scan
+  Context retrieval, loop-closure coordination, pose-graph integration, map
+  products, and regression tests.
+- The original MIT-SPARK copyright notice and MIT license are retained in
+  [`LICENSE`](LICENSE).
+
+Academic use should cite the original KISS-Matcher and Scan Context papers
+listed in this repository's documentation.
+
 ## :package: Installation
 
 > All installations are set up automatically in an out-of-the-box manner.
